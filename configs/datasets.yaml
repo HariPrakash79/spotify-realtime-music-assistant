@@ -1,0 +1,15 @@
+datasets:
+  lastfm_1k:
+    url: "https://zenodo.org/records/6090214/files/lastfm-dataset-1K.tar.gz?download=1"
+    object_key: "raw/lastfm/lastfm-dataset-1K.tar.gz"
+    notes: "Listening events + users + tags from Last.fm 1K users."
+
+  fma_metadata:
+    url: "https://os.unil.cloud.switch.ch/fma/fma_metadata.zip"
+    object_key: "raw/fma/fma_metadata.zip"
+    notes: "Track-level metadata, genres, and tags."
+
+  deezer_recsys25_archive:
+    url: "https://zenodo.org/records/17154089/files/deezer-recsys25.tar.gz?download=1"
+    object_key: "raw/deezer_recsys25/deezer-recsys25.tar.gz"
+    notes: "RecSys 2025 Deezer listening events + embeddings (archive, 9.8 GB)."

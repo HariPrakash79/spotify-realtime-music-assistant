@@ -1,0 +1,6 @@
+boto3==1.37.3
+PyYAML==6.0.2
+requests==2.32.3
+pandas==2.3.2
+pyarrow==21.0.0
+kafka-python==2.1.2
