@@ -135,6 +135,32 @@ Produce only a bounded sample:
 python scripts/produce_listen_events.py --source lastfm_1k --topic listen_events_raw --max-records 50000
 ```
 
+## Consume Kafka events into Postgres
+
+Set a Postgres DSN:
+
+```powershell
+$env:POSTGRES_DSN="postgresql://USER:PASSWORD@HOST:5432/DBNAME?sslmode=require"
+```
+
+Dry run (consume and validate payloads, no DB write):
+
+```powershell
+python scripts/consume_listen_events_to_postgres.py --topic listen_events_raw --dry-run --max-messages 10000
+```
+
+Write to Postgres:
+
+```powershell
+python scripts/consume_listen_events_to_postgres.py --topic listen_events_raw
+```
+
+Bounded run (for testing):
+
+```powershell
+python scripts/consume_listen_events_to_postgres.py --topic listen_events_raw --max-messages 50000
+```
+
 Force overwrite existing objects:
 
 ```powershell

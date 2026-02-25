@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS music.user_features (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE VIEW IF NOT EXISTS music.v_user_recent_activity AS
+CREATE OR REPLACE VIEW music.v_user_recent_activity AS
 SELECT
     user_id,
     COUNT(*) AS plays_7d,
