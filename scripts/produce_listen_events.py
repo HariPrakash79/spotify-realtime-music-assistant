@@ -12,8 +12,9 @@ import argparse
 import io
 import json
 import os
+import random
 from datetime import datetime, timezone
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional
 
 import boto3
 import pandas as pd
@@ -147,6 +148,8 @@ def iter_event_records_from_s3_object(
     bucket: str,
     key: str,
     batch_rows: int,
+    randomize_rows: bool = False,
+    rng: Optional[random.Random] = None,
 ) -> Iterable[Dict[str, Optional[str]]]:
     obj = s3.get_object(Bucket=bucket, Key=key)
     body = obj["Body"].read()
@@ -155,6 +158,13 @@ def iter_event_records_from_s3_object(
 
     for batch in pf.iter_batches(batch_size=batch_rows):
         df = batch.to_pandas()
+        if randomize_rows and len(df) > 1:
+            idx = list(range(len(df)))
+            if rng is not None:
+                rng.shuffle(idx)
+            else:
+                random.shuffle(idx)
+            df = df.iloc[idx]
         for _, row in df.iterrows():
             yield {
                 "source": clean_text(row.get("source")),
@@ -184,6 +194,29 @@ def main() -> None:
     )
     parser.add_argument("--max-files", type=int, default=None, help="Limit number of parquet files.")
     parser.add_argument("--max-records", type=int, default=None, help="Limit number of produced records.")
+    parser.add_argument(
+        "--max-records-per-user",
+        type=int,
+        default=None,
+        help="Optional cap per user to improve diversity (e.g., 3000 for ~100 users in 300k records).",
+    )
+    parser.add_argument(
+        "--sample-strategy",
+        choices=["sequential", "random"],
+        default="sequential",
+        help="Sequential preserves S3 file order; random shuffles file order for more user diversity.",
+    )
+    parser.add_argument(
+        "--randomize-rows",
+        action="store_true",
+        help="Shuffle row order within each parquet batch when sample strategy is random.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed used when --sample-strategy random is enabled.",
+    )
     parser.add_argument("--parquet-batch-rows", type=int, default=10000, help="Rows per parquet read batch.")
     parser.add_argument("--acks", default="all", choices=["0", "1", "all"], help="Kafka acks mode.")
     parser.add_argument("--linger-ms", type=int, default=20, help="Kafka producer linger_ms.")
@@ -210,6 +243,10 @@ def main() -> None:
         run_date=run_date,
         max_files=args.max_files,
     )
+    rng: Optional[random.Random] = None
+    if args.sample_strategy == "random":
+        rng = random.Random(args.seed)
+        rng.shuffle(keys)
 
     print(f"source={args.source} run_date={run_date} files={len(keys)}")
     print(f"s3://{args.bucket}/{build_stage_prefix(args.root_prefix, args.source, run_date)}")
@@ -228,6 +265,8 @@ def main() -> None:
 
     produced = 0
     invalid = 0
+    skipped_user_cap = 0
+    per_user_counts: Dict[str, int] = {}
 
     for i, key in enumerate(keys, start=1):
         print(f"[{i}/{len(keys)}] reading {key}")
@@ -236,18 +275,29 @@ def main() -> None:
             bucket=args.bucket,
             key=key,
             batch_rows=args.parquet_batch_rows,
+            randomize_rows=(args.sample_strategy == "random" and args.randomize_rows),
+            rng=rng,
         ):
-            if not event.get("user_id") or not event.get("event_ts"):
+            user_id = event.get("user_id")
+            if not user_id or not event.get("event_ts"):
                 invalid += 1
                 continue
+
+            if args.max_records_per_user is not None:
+                seen_for_user = per_user_counts.get(user_id, 0)
+                if seen_for_user >= args.max_records_per_user:
+                    skipped_user_cap += 1
+                    continue
 
             if args.dry_run:
                 produced += 1
                 if produced <= 3:
                     print("sample", event)
             else:
-                producer.send(args.topic, key=event["user_id"], value=event)
+                producer.send(args.topic, key=user_id, value=event)
                 produced += 1
+
+            per_user_counts[user_id] = per_user_counts.get(user_id, 0) + 1
 
             if args.max_records and produced >= args.max_records:
                 break
@@ -263,6 +313,8 @@ def main() -> None:
         "done "
         f"produced={produced} "
         f"invalid_skipped={invalid} "
+        f"user_cap_skipped={skipped_user_cap} "
+        f"unique_users={len(per_user_counts)} "
         f"topic={args.topic} "
         f"run_date={run_date}"
     )

@@ -12,10 +12,11 @@ Target table:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
-from datetime import datetime
-from typing import Dict, Iterable, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import List, Optional, Tuple
 
 from kafka import KafkaConsumer
 from psycopg import connect
@@ -30,8 +31,10 @@ INSERT INTO music.listen_events (
     event_ts,
     event_type,
     track_name,
-    artist_name
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    artist_name,
+    event_hash
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (event_hash) DO NOTHING
 """
 
 
@@ -44,7 +47,47 @@ def clean_text(value: object) -> Optional[str]:
     return text
 
 
-def parse_event(msg_value: object) -> Optional[Tuple[str, str, Optional[str], Optional[str], str, str, Optional[str], Optional[str]]]:
+def build_event_hash(
+    source: str,
+    user_id: str,
+    track_id: Optional[str],
+    artist_id: Optional[str],
+    event_ts: str,
+    event_type: str,
+    track_name: Optional[str],
+    artist_name: Optional[str],
+) -> str:
+    parts = [
+        source,
+        user_id,
+        track_id or "",
+        artist_id or "",
+        event_ts,
+        event_type,
+        track_name or "",
+        artist_name or "",
+    ]
+    payload = "\x1f".join(parts)
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()
+
+
+def canonicalize_event_ts(event_ts: str) -> str:
+    text = event_ts.strip()
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.isoformat(timespec="microseconds")
+
+
+def parse_event(
+    msg_value: object,
+) -> Optional[Tuple[str, str, Optional[str], Optional[str], str, str, Optional[str], Optional[str], str]]:
     if not isinstance(msg_value, dict):
         return None
 
@@ -60,6 +103,19 @@ def parse_event(msg_value: object) -> Optional[Tuple[str, str, Optional[str], Op
     if not source or not user_id or not event_ts:
         return None
 
+    event_ts = canonicalize_event_ts(event_ts)
+
+    event_hash = build_event_hash(
+        source=source,
+        user_id=user_id,
+        track_id=track_id,
+        artist_id=artist_id,
+        event_ts=event_ts,
+        event_type=event_type,
+        track_name=track_name,
+        artist_name=artist_name,
+    )
+
     return (
         source,
         user_id,
@@ -69,6 +125,7 @@ def parse_event(msg_value: object) -> Optional[Tuple[str, str, Optional[str], Op
         event_type,
         track_name,
         artist_name,
+        event_hash,
     )
 
 

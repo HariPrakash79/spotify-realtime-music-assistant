@@ -78,6 +78,20 @@ Upload Deezer RecSys25 archive:
 python scripts/stream_to_s3.py --dataset deezer_recsys25_archive
 ```
 
+## Profile user diversity before ingest
+
+Quick sample scan (fast lower-bound estimate):
+
+```powershell
+python scripts/profile_user_diversity.py --source lastfm_1k --sample-files 30
+```
+
+Exact distinct users (scans all stage files):
+
+```powershell
+python scripts/profile_user_diversity.py --source lastfm_1k --all-files
+```
+
 ## Normalize to SQL-friendly stage files
 
 This step converts raw files into staged parquet tables that are easier to query and load into Postgres.
@@ -135,6 +149,18 @@ Produce only a bounded sample:
 python scripts/produce_listen_events.py --source lastfm_1k --topic listen_events_raw --max-records 50000
 ```
 
+Produce a randomized bounded sample (better user diversity):
+
+```powershell
+python scripts/produce_listen_events.py --source lastfm_1k --topic listen_events_raw --sample-strategy random --randomize-rows --seed 42 --max-records 50000
+```
+
+Produce ~300k events with user diversity guardrail (target >=100 users):
+
+```powershell
+python scripts/produce_listen_events.py --source lastfm_1k --topic listen_events_raw --sample-strategy random --randomize-rows --seed 42 --max-records 300000 --max-records-per-user 3000
+```
+
 ## Consume Kafka events into Postgres
 
 Set a Postgres DSN:
@@ -159,6 +185,75 @@ Bounded run (for testing):
 
 ```powershell
 python scripts/consume_listen_events_to_postgres.py --topic listen_events_raw --max-messages 50000
+```
+
+## Recommendation SQL layer
+
+Apply latest schema/views:
+
+```powershell
+python -c "import pathlib; from psycopg import connect; sql=pathlib.Path('sql/postgres_schema.sql').read_text(); conn=connect(); cur=conn.cursor(); cur.execute(sql); conn.commit(); conn.close(); print('schema updated')"
+```
+
+Get top personalized recommendations for one user (replace `USER_ID_HERE`):
+
+```sql
+SELECT
+    user_id,
+    recommendation_rank,
+    track_name,
+    artist_name,
+    recommendation_score
+FROM music.v_user_recommendations_30d
+WHERE user_id = 'USER_ID_HERE'
+  AND recommendation_rank <= 20
+ORDER BY recommendation_rank;
+```
+
+Global fallback tracks (trending in last 7 days):
+
+```sql
+SELECT
+    global_rank_7d,
+    track_name,
+    artist_name,
+    plays_7d,
+    unique_listeners_7d
+FROM music.v_global_trending_tracks_7d
+WHERE global_rank_7d <= 20
+ORDER BY global_rank_7d;
+```
+
+Use the helper script instead of long one-liners:
+
+```powershell
+python scripts/query_recommendations.py --query top-users
+python scripts/query_recommendations.py --query recs --user-id user_000002
+python scripts/query_recommendations.py --query trending --limit 10
+```
+
+Or use ready SQL snippets in:
+
+`queries/recommendations.sql`
+
+## Data targets and progress check
+
+Current project goals:
+
+- `>= 500000` listen events
+- `>= 50000` distinct tracks
+- `>= 1000` distinct users
+
+Check progress against targets:
+
+```powershell
+python scripts/check_data_targets.py
+```
+
+If you want custom targets for a smaller milestone:
+
+```powershell
+python scripts/check_data_targets.py --target-events 300000 --target-tracks 20000 --target-users 100
 ```
 
 Force overwrite existing objects:
