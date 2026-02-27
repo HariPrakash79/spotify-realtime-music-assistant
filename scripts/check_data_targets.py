@@ -25,7 +25,7 @@ METRICS_SQL = """
 SELECT
     COUNT(*)::BIGINT AS total_events,
     COUNT(DISTINCT user_id)::BIGINT AS distinct_users,
-    COUNT(DISTINCT track_id)::BIGINT FILTER (WHERE track_id IS NOT NULL) AS distinct_tracks
+    COUNT(DISTINCT track_id)::BIGINT AS distinct_tracks
 FROM music.listen_events
 """
 

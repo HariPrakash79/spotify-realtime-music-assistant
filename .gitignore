@@ -5,7 +5,11 @@ __pycache__/
 *.key
 *.env
 .env*
+!.env.example
 .aws/
 *accessKeys.csv
 credentials*
 secrets*
+# Deezer column audit outputs
+artifacts/deezer_audit/
+artifacts/inspection/

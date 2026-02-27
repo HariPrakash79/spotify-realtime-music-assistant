@@ -1,0 +1,122 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Normalize Deezer (Limited)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/normalize_to_stage.py",
+      "console": "integratedTerminal",
+      "args": [
+        "--dataset",
+        "deezer_recsys25_archive",
+        "--max-records",
+        "100000",
+        "--deezer-max-members",
+        "10",
+        "--tmp-dir",
+        "D:\\temp",
+        "--audit-dir",
+        "artifacts/deezer_audit"
+      ],
+      "env": {
+        "AWS_PROFILE": "spotify",
+        "AWS_REGION": "us-east-1",
+        "DATA_BUCKET": "spotify-project-hari-2026",
+        "S3_PREFIX": "music-assistant"
+      }
+    },
+    {
+      "name": "Normalize Deezer (Scale)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/normalize_to_stage.py",
+      "console": "integratedTerminal",
+      "args": [
+        "--dataset",
+        "deezer_recsys25_archive",
+        "--max-records",
+        "800000",
+        "--deezer-max-members",
+        "20",
+        "--tmp-dir",
+        "D:\\temp",
+        "--audit-dir",
+        "artifacts/deezer_audit"
+      ],
+      "env": {
+        "AWS_PROFILE": "spotify",
+        "AWS_REGION": "us-east-1",
+        "DATA_BUCKET": "spotify-project-hari-2026",
+        "S3_PREFIX": "music-assistant"
+      }
+    },
+    {
+      "name": "Produce Deezer -> Kafka (300k)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/produce_listen_events.py",
+      "console": "integratedTerminal",
+      "args": [
+        "--source",
+        "deezer_recsys25_archive",
+        "--topic",
+        "listen_events_raw",
+        "--max-records",
+        "300000",
+        "--sample-strategy",
+        "random",
+        "--randomize-rows",
+        "--seed",
+        "42",
+        "--max-records-per-user",
+        "500"
+      ],
+      "env": {
+        "AWS_PROFILE": "spotify",
+        "AWS_REGION": "us-east-1",
+        "DATA_BUCKET": "spotify-project-hari-2026",
+        "S3_PREFIX": "music-assistant",
+        "KAFKA_BOOTSTRAP_SERVERS": "localhost:9092"
+      }
+    },
+    {
+      "name": "Inspect Ingested Data (Export CSV/JSON)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/inspect_ingested_data.py",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "args": [
+        "--output-dir",
+        "artifacts/inspection",
+        "--sample-events",
+        "1000",
+        "--top-users",
+        "200",
+        "--top-genres",
+        "200"
+      ]
+    },
+    {
+      "name": "Consume Kafka -> Postgres (300k)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/consume_listen_events_to_postgres.py",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "args": [
+        "--bootstrap-servers",
+        "localhost:9092",
+        "--topic",
+        "listen_events_raw",
+        "--group-id",
+        "music-listen-events-sink-v-deezer",
+        "--max-messages",
+        "300000",
+        "--insert-batch-size",
+        "1000"
+      ]
+    }
+  ]
+}

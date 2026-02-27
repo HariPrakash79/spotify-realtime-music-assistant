@@ -78,6 +78,28 @@ Upload Deezer RecSys25 archive:
 python scripts/stream_to_s3.py --dataset deezer_recsys25_archive
 ```
 
+## Run From VS Code (No Manual Terminal Commands)
+
+Use Run and Debug with:
+
+- `Normalize Deezer (Limited)`
+- `Normalize Deezer (Scale)`
+- `Produce Deezer -> Kafka (300k)`
+- `Consume Kafka -> Postgres (300k)`
+- `Inspect Ingested Data (Export CSV/JSON)`
+
+These are preconfigured in `.vscode/launch.json`.
+
+Inspection outputs are written to:
+
+- `artifacts/inspection/summary.json`
+- `artifacts/inspection/source_breakdown.csv`
+- `artifacts/inspection/top_users.csv`
+- `artifacts/inspection/catalog_genres.csv`
+- `artifacts/inspection/event_sample.csv`
+
+Before running inspection from VS Code, create `.env` from `.env.example` and set `POSTGRES_DSN`.
+
 ## Profile user diversity before ingest
 
 Quick sample scan (fast lower-bound estimate):
@@ -114,9 +136,22 @@ Write stage parquet:
 python scripts/normalize_to_stage.py --dataset all
 ```
 
+Normalize Deezer with safe limits (recommended first run):
+
+```powershell
+$env:NORMALIZE_TMP_DIR="D:\temp"
+python scripts/normalize_to_stage.py --dataset deezer_recsys25_archive --max-records 800000 --deezer-max-members 20
+```
+
+This run also writes a column-mapping audit JSON to:
+
+- `artifacts/deezer_audit/`
+- Audit is written even if Deezer normalization fails, so you can inspect detected columns.
+
 Outputs:
 
 - `s3://<bucket>/<prefix>/stage/listen_events/source=lastfm_1k/run_date=YYYY-MM-DD/*.parquet`
+- `s3://<bucket>/<prefix>/stage/listen_events/source=deezer_recsys25_archive/run_date=YYYY-MM-DD/*.parquet`
 - `s3://<bucket>/<prefix>/stage/track_catalog/source=fma_metadata/run_date=YYYY-MM-DD/*.parquet`
 
 ## Produce listen events to Kafka
@@ -141,6 +176,12 @@ Produce to Kafka topic `listen_events_raw`:
 
 ```powershell
 python scripts/produce_listen_events.py --source lastfm_1k --topic listen_events_raw
+```
+
+Produce Deezer staged events to the same topic:
+
+```powershell
+python scripts/produce_listen_events.py --source deezer_recsys25_archive --topic listen_events_raw --max-records 300000 --sample-strategy random --randomize-rows --seed 42 --max-records-per-user 500
 ```
 
 Produce only a bounded sample:
