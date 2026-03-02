@@ -86,6 +86,63 @@ CREATE INDEX IF NOT EXISTS idx_listen_events_track_ts
 CREATE INDEX IF NOT EXISTS idx_listen_events_source_ts
     ON music.listen_events (source, event_ts DESC);
 
+-- Dense modeling slice (no re-ingestion needed):
+-- 1) strict dense users (>20 plays) for high-confidence personalization
+CREATE OR REPLACE VIEW music.v_model_users_gt20 AS
+WITH user_counts AS (
+    SELECT
+        user_id,
+        COUNT(*)::BIGINT AS plays
+    FROM music.listen_events
+    WHERE event_type = 'play'
+    GROUP BY user_id
+)
+SELECT
+    user_id,
+    plays
+FROM user_counts
+WHERE plays > 20
+
+ORDER BY plays DESC, user_id;
+
+-- 2) balanced modeling users: always top 1000 by play count
+CREATE OR REPLACE VIEW music.v_model_users_1000 AS
+WITH user_counts AS (
+    SELECT
+        user_id,
+        COUNT(*)::BIGINT AS plays
+    FROM music.listen_events
+    WHERE event_type = 'play'
+    GROUP BY user_id
+),
+ranked AS (
+    SELECT
+        user_id,
+        plays,
+        ROW_NUMBER() OVER (ORDER BY plays DESC, user_id) AS rn
+    FROM user_counts
+)
+SELECT
+    user_id,
+    plays
+FROM ranked
+WHERE rn <= 1000;
+
+CREATE OR REPLACE VIEW music.v_listen_events_model_1000 AS
+SELECT
+    le.*
+FROM music.listen_events le
+JOIN music.v_model_users_1000 mu
+  ON mu.user_id = le.user_id;
+
+CREATE OR REPLACE VIEW music.v_model_metrics_1000 AS
+SELECT
+    COUNT(*)::BIGINT AS events,
+    COUNT(DISTINCT user_id)::BIGINT AS users,
+    COUNT(DISTINCT track_id)::BIGINT AS tracks,
+    ROUND(COUNT(*)::NUMERIC / NULLIF(COUNT(DISTINCT user_id), 0), 2) AS events_per_user
+FROM music.v_listen_events_model_1000;
+
 CREATE TABLE IF NOT EXISTS music.user_features (
     user_id             TEXT PRIMARY KEY,
     last_event_ts       TIMESTAMPTZ,
@@ -404,3 +461,10 @@ SELECT
     track_popularity_30d,
     recommendation_score
 FROM ranked_fallback;
+
+CREATE OR REPLACE VIEW music.v_user_recommendations_30d_dense_1000 AS
+SELECT
+    r.*
+FROM music.v_user_recommendations_30d r
+JOIN music.v_model_users_1000 mu
+  ON mu.user_id = r.user_id;

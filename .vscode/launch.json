@@ -133,6 +133,13 @@
         "--target-tracks",
         "50000"
       ]
+    },
+    {
+      "name": "Run Recommendation API",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/recommendation_api.py",
+      "console": "integratedTerminal"
     }
   ]
 }

@@ -272,11 +272,52 @@ Use the helper script instead of long one-liners:
 python scripts/query_recommendations.py --query top-users
 python scripts/query_recommendations.py --query recs --user-id user_000002
 python scripts/query_recommendations.py --query trending --limit 10
+python scripts/query_recommendations.py --query model-metrics
+python scripts/query_recommendations.py --query top-users-model --limit 20
+python scripts/query_recommendations.py --query recs-model --user-id user_000002 --limit 20
 ```
+
+Dense personalization views (auto-derived from existing data, no re-ingestion):
+
+- `music.v_model_users_gt20` -> strict dense users (`>20` plays)
+- `music.v_model_users_1000` -> balanced slice: top 1000 users by plays
+- `music.v_listen_events_model_1000` -> events for only those users
+- `music.v_model_metrics_1000` -> events/users/tracks/events_per_user for the dense slice
+- `music.v_user_recommendations_30d_dense_1000` -> personalized recommendations only for dense slice users
 
 Or use ready SQL snippets in:
 
 `queries/recommendations.sql`
+
+## Recommendation API (serving layer)
+
+Install dependencies:
+
+```powershell
+pip install -r requirements.txt
+```
+
+Run API:
+
+```powershell
+python scripts/recommendation_api.py
+```
+
+Base URL: `http://localhost:8000`
+
+Endpoints:
+
+- `GET /metrics/model`
+- `GET /trending?limit=20`
+- `GET /recs/{user_id}?limit=20`
+
+Examples:
+
+```powershell
+curl "http://localhost:8000/metrics/model"
+curl "http://localhost:8000/trending?limit=10"
+curl "http://localhost:8000/recs/user_000002?limit=20"
+```
 
 ## Data targets and progress check
 

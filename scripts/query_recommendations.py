@@ -4,8 +4,11 @@ Run common recommendation queries against Postgres/RDS.
 
 Examples:
   python scripts/query_recommendations.py --query top-users
+  python scripts/query_recommendations.py --query top-users-model
   python scripts/query_recommendations.py --query recs --user-id user_000002
+  python scripts/query_recommendations.py --query recs-model --user-id user_000002
   python scripts/query_recommendations.py --query trending --limit 10
+  python scripts/query_recommendations.py --query model-metrics
 """
 
 from __future__ import annotations
@@ -28,6 +31,15 @@ ORDER BY plays DESC
 LIMIT %s
 """
 
+TOP_USERS_MODEL_SQL = """
+SELECT
+    user_id,
+    plays
+FROM music.v_model_users_1000
+ORDER BY plays DESC, user_id
+LIMIT %s
+"""
+
 
 USER_RECS_SQL = """
 SELECT
@@ -37,6 +49,19 @@ SELECT
     artist_name,
     recommendation_score
 FROM music.v_user_recommendations_30d
+WHERE user_id = %s
+  AND recommendation_rank <= %s
+ORDER BY recommendation_rank
+"""
+
+USER_RECS_MODEL_SQL = """
+SELECT
+    user_id,
+    recommendation_rank,
+    track_name,
+    artist_name,
+    recommendation_score
+FROM music.v_user_recommendations_30d_dense_1000
 WHERE user_id = %s
   AND recommendation_rank <= %s
 ORDER BY recommendation_rank
@@ -53,6 +78,15 @@ SELECT
 FROM music.v_global_trending_tracks_7d
 WHERE global_rank_7d <= %s
 ORDER BY global_rank_7d
+"""
+
+MODEL_METRICS_SQL = """
+SELECT
+    events,
+    users,
+    tracks,
+    events_per_user
+FROM music.v_model_metrics_1000
 """
 
 
@@ -95,12 +129,20 @@ def print_rows(rows: Sequence[Mapping[str, object]]) -> None:
 def run_query(query_name: str, limit: int, user_id: str | None) -> tuple[str, Iterable[object]]:
     if query_name == "top-users":
         return TOP_USERS_SQL, (limit,)
+    if query_name == "top-users-model":
+        return TOP_USERS_MODEL_SQL, (limit,)
     if query_name == "trending":
         return TRENDING_SQL, (limit,)
     if query_name == "recs":
         if not user_id:
             raise ValueError("--user-id is required when --query recs is used.")
         return USER_RECS_SQL, (user_id, limit)
+    if query_name == "recs-model":
+        if not user_id:
+            raise ValueError("--user-id is required when --query recs-model is used.")
+        return USER_RECS_MODEL_SQL, (user_id, limit)
+    if query_name == "model-metrics":
+        return MODEL_METRICS_SQL, ()
     raise ValueError(f"Unsupported query: {query_name}")
 
 
@@ -108,7 +150,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run recommendation queries on Postgres.")
     parser.add_argument(
         "--query",
-        choices=["top-users", "recs", "trending"],
+        choices=["top-users", "top-users-model", "recs", "recs-model", "trending", "model-metrics"],
         default="recs",
         help="Which query to run.",
     )
