@@ -319,6 +319,20 @@ curl "http://localhost:8000/trending?limit=10"
 curl "http://localhost:8000/recs/user_000002?limit=20"
 ```
 
+Python client helper:
+
+```powershell
+python scripts/recommendation_client.py --query metrics
+python scripts/recommendation_client.py --query trending --limit 10
+python scripts/recommendation_client.py --query recs --user-id 101617 --limit 20 --fallback-to-trending
+```
+
+Optional base URL override:
+
+```powershell
+$env:RECOMMENDATION_API_BASE_URL="http://localhost:8000"
+```
+
 ## Data targets and progress check
 
 Current project goals:

@@ -140,6 +140,17 @@
       "request": "launch",
       "program": "${workspaceFolder}/scripts/recommendation_api.py",
       "console": "integratedTerminal"
+    },
+    {
+      "name": "Call Recommendation API (Metrics)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/recommendation_client.py",
+      "console": "integratedTerminal",
+      "args": [
+        "--query",
+        "metrics"
+      ]
     }
   ]
 }
