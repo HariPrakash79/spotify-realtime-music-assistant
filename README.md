@@ -86,6 +86,7 @@ Use Run and Debug with:
 - `Normalize Deezer (Scale)`
 - `Produce Deezer -> Kafka (300k)`
 - `Consume Kafka -> Postgres (300k)`
+- `Check Data Targets (500k/1k/50k)`
 - `Inspect Ingested Data (Export CSV/JSON)`
 
 These are preconfigured in `.vscode/launch.json`.

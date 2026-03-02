@@ -13,3 +13,6 @@ secrets*
 # Deezer column audit outputs
 artifacts/deezer_audit/
 artifacts/inspection/
+
+# Local machine secrets (do not commit)
+.local/secrets.ps1

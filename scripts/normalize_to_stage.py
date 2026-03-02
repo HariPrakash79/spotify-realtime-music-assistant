@@ -16,9 +16,11 @@ Output prefixes:
 from __future__ import annotations
 
 import argparse
+import bz2
 import gzip
 import io
 import json
+import lzma
 import os
 import re
 import tarfile
@@ -173,6 +175,8 @@ EMBEDDING_HINTS = [
     "spectrogram",
     "mfcc",
 ]
+
+COMPRESSED_SUFFIXES = [".gz", ".bz2", ".xz"]
 
 
 def load_datasets(config_path: str) -> Dict[str, Dict[str, str]]:
@@ -356,6 +360,52 @@ def parse_event_ts(value: object) -> Optional[datetime]:
 def is_embedding_like_member(member_name: str) -> bool:
     lowered = member_name.lower()
     return any(hint in lowered for hint in EMBEDDING_HINTS)
+
+
+def strip_compression_suffix(member_name: str) -> str:
+    lowered = member_name.lower()
+    changed = True
+    while changed:
+        changed = False
+        for suffix in COMPRESSED_SUFFIXES:
+            if lowered.endswith(suffix):
+                lowered = lowered[: -len(suffix)]
+                changed = True
+    return lowered
+
+
+def detect_tabular_member_type(member_name: str) -> Optional[str]:
+    base = strip_compression_suffix(member_name)
+    leaf = Path(base).name
+    if base.endswith(".parquet") or base.endswith(".pq"):
+        return "parquet"
+    if base.endswith(".csv"):
+        return "csv"
+    if base.endswith(".tsv"):
+        return "tsv"
+    if base.endswith(".psv") or base.endswith(".pipe"):
+        return "pipe"
+    if base.endswith(".jsonl") or base.endswith(".ndjson"):
+        return "jsonl"
+    if base.endswith(".txt") or base.endswith(".dat"):
+        return "text"
+    if base.endswith(".json"):
+        return "json"
+    # Deezer RecSys sessions files are often extensionless, e.g. user_sessions/sessions_000000000123
+    if leaf.startswith("sessions_") and "/user_sessions/" in base:
+        return "session_like"
+    return None
+
+
+def open_maybe_compressed_stream(stream, member_name: str):
+    lowered = member_name.lower()
+    if lowered.endswith(".gz"):
+        return gzip.GzipFile(fileobj=stream)
+    if lowered.endswith(".bz2"):
+        return bz2.BZ2File(stream)
+    if lowered.endswith(".xz"):
+        return lzma.LZMAFile(stream)
+    return stream
 
 
 def rows_from_event_df(
@@ -685,11 +735,22 @@ def normalize_deezer_listen_events(
     detected_mappings: List[Dict[str, object]] = []
     skipped_sample: List[Dict[str, str]] = []
     skip_counts: Dict[str, int] = {}
+    seen_file_members: List[str] = []
+    unsupported_extension_counts: Dict[str, int] = {}
 
     def note_skip(member_name: str, reason: str) -> None:
         skip_counts[reason] = skip_counts.get(reason, 0) + 1
         if len(skipped_sample) < 50:
             skipped_sample.append({"member": member_name, "reason": reason})
+
+    def note_file_member(member_name: str) -> None:
+        if len(seen_file_members) < 200:
+            seen_file_members.append(member_name)
+
+    def note_unsupported_extension(member_name: str) -> None:
+        base = strip_compression_suffix(member_name)
+        ext = Path(base).suffix or "<no_ext>"
+        unsupported_extension_counts[ext] = unsupported_extension_counts.get(ext, 0) + 1
 
     def add_mapping(member_name: str, columns: List[str], col_map: Dict[str, Optional[str]]) -> None:
         detected_mappings.append(
@@ -710,11 +771,12 @@ def normalize_deezer_listen_events(
                 continue
 
             member_name = member.name
+            note_file_member(member_name)
             lower_name = member_name.lower()
-            is_parquet_member = ".parquet" in lower_name
-            is_csv_member = lower_name.endswith(".csv") or ".csv." in lower_name
-            is_tsv_member = lower_name.endswith(".tsv") or ".tsv." in lower_name
-            if not (is_parquet_member or is_csv_member or is_tsv_member):
+            member_kind = detect_tabular_member_type(lower_name)
+            if member_kind is None:
+                note_skip(member_name, "unsupported_extension")
+                note_unsupported_extension(member_name)
                 continue
 
             scanned_members += 1
@@ -731,16 +793,14 @@ def normalize_deezer_listen_events(
             if stream is None:
                 note_skip(member_name, "cannot_extract_stream")
                 continue
-            read_stream = stream
-            if lower_name.endswith(".gz"):
-                try:
-                    read_stream = gzip.GzipFile(fileobj=stream)
-                except Exception as exc:
-                    print(f"skipping {member_name} (cannot open gz stream: {exc})")
-                    note_skip(member_name, "bad_gzip_stream")
-                    continue
+            try:
+                read_stream = open_maybe_compressed_stream(stream, member_name)
+            except Exception as exc:
+                print(f"skipping {member_name} (cannot open compressed stream: {exc})")
+                note_skip(member_name, "bad_compressed_stream")
+                continue
 
-            if is_parquet_member:
+            if member_kind in {"parquet", "session_like"}:
                 with tempfile.SpooledTemporaryFile(
                     max_size=256 * MB,
                     dir=tmp_dir or None,
@@ -755,8 +815,78 @@ def normalize_deezer_listen_events(
                     try:
                         pf = pq.ParquetFile(tmp)
                     except Exception as exc:
-                        print(f"skipping {member_name} (cannot read parquet: {exc})")
-                        note_skip(member_name, "bad_parquet")
+                        if member_kind == "parquet":
+                            print(f"skipping {member_name} (cannot read parquet: {exc})")
+                            note_skip(member_name, "bad_parquet")
+                            continue
+
+                        # session_like fallback: try to parse as text/jsonl when extensionless parquet detection fails
+                        def _open_session_fallback_stream():
+                            tmp.seek(0)
+                            header = tmp.read(6)
+                            tmp.seek(0)
+                            if header.startswith(b"\x1f\x8b"):
+                                return gzip.GzipFile(fileobj=tmp)
+                            if header.startswith(b"BZh"):
+                                return bz2.BZ2File(tmp)
+                            if header.startswith(b"\xfd7zXZ\x00"):
+                                return lzma.LZMAFile(tmp)
+                            return tmp
+
+                        chunk_iter = None
+                        try:
+                            chunk_iter = pd.read_csv(
+                                _open_session_fallback_stream(),
+                                sep=None,
+                                engine="python",
+                                chunksize=batch_rows,
+                                low_memory=False,
+                            )
+                        except Exception:
+                            try:
+                                chunk_iter = pd.read_json(
+                                    _open_session_fallback_stream(),
+                                    lines=True,
+                                    chunksize=batch_rows,
+                                )
+                            except Exception as fallback_exc:
+                                print(
+                                    f"skipping {member_name} (cannot read session file as parquet/text/jsonl: {fallback_exc})"
+                                )
+                                note_skip(member_name, "bad_session_like_file")
+                                continue
+
+                        col_map: Optional[Dict[str, Optional[str]]] = None
+                        for df in chunk_iter:
+                            if col_map is None:
+                                col_map = infer_event_columns_from_df(df)
+                                if col_map is None:
+                                    print(f"skipping {member_name} (no usable user/track columns)")
+                                    note_skip(member_name, "no_user_track_columns")
+                                    break
+                                used_members += 1
+                                add_mapping(member_name, [str(c) for c in df.columns], col_map)
+                                print(
+                                    f"reading {member_name} user={col_map['user_id']} "
+                                    f"track={col_map['track_id']} ts={col_map['event_ts']}"
+                                )
+
+                            total, bad, should_stop = rows_from_event_df(
+                                df=df,
+                                column_map=col_map,
+                                source_name=source_name,
+                                writer=writer,
+                                rows_buffer=rows,
+                                batch_rows=batch_rows,
+                                total=total,
+                                bad=bad,
+                                max_records=max_records,
+                                allow_missing_ts=True,
+                                fallback_base_ts=run_start_ts,
+                            )
+                            if should_stop:
+                                print(f"{source_name}: reached --max-records={max_records}, stopping.")
+                                break
                         continue
 
                     batch_iter = pf.iter_batches(batch_size=batch_rows)
@@ -817,18 +947,50 @@ def normalize_deezer_listen_events(
                             break
                 continue
 
-            sep = "\t" if is_tsv_member else ","
-            try:
-                chunk_iter = pd.read_csv(
-                    read_stream,
-                    sep=sep,
-                    chunksize=batch_rows,
-                    low_memory=False,
-                )
-            except Exception as exc:
-                print(f"skipping {member_name} (cannot read text table: {exc})")
-                note_skip(member_name, "bad_text_table")
-                continue
+            if member_kind == "jsonl":
+                try:
+                    chunk_iter = pd.read_json(
+                        read_stream,
+                        lines=True,
+                        chunksize=batch_rows,
+                    )
+                except Exception as exc:
+                    print(f"skipping {member_name} (cannot read jsonl table: {exc})")
+                    note_skip(member_name, "bad_jsonl_table")
+                    continue
+            elif member_kind == "json":
+                try:
+                    json_df = pd.read_json(read_stream, lines=False)
+                    chunk_iter = [json_df]
+                except Exception as exc:
+                    print(f"skipping {member_name} (cannot read json table: {exc})")
+                    note_skip(member_name, "bad_json_table")
+                    continue
+            else:
+                sep = ","
+                read_kwargs = {
+                    "chunksize": batch_rows,
+                    "low_memory": False,
+                }
+                if member_kind == "tsv":
+                    sep = "\t"
+                    read_kwargs["sep"] = sep
+                elif member_kind == "pipe":
+                    sep = "|"
+                    read_kwargs["sep"] = sep
+                elif member_kind == "text":
+                    # Unknown text files can still be parseable tables; let pandas sniff.
+                    read_kwargs["sep"] = None
+                    read_kwargs["engine"] = "python"
+                else:
+                    read_kwargs["sep"] = sep
+
+                try:
+                    chunk_iter = pd.read_csv(read_stream, **read_kwargs)
+                except Exception as exc:
+                    print(f"skipping {member_name} (cannot read text table: {exc})")
+                    note_skip(member_name, "bad_text_table")
+                    continue
 
             col_map: Optional[Dict[str, Optional[str]]] = None
             for df in chunk_iter:
@@ -884,6 +1046,8 @@ def normalize_deezer_listen_events(
         "deezer_max_members": max_members,
         "skip_counts": skip_counts,
         "skipped_members_sample": skipped_sample,
+        "seen_file_members_sample": seen_file_members,
+        "unsupported_extension_counts": unsupported_extension_counts,
         "detected_mappings": detected_mappings,
         "status": "ok" if total > 0 else "no_rows",
     }

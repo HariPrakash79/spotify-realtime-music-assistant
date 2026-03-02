@@ -117,6 +117,22 @@
         "--insert-batch-size",
         "1000"
       ]
+    },
+    {
+      "name": "Check Data Targets (500k/1k/50k)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/check_data_targets.py",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "args": [
+        "--target-events",
+        "500000",
+        "--target-users",
+        "1000",
+        "--target-tracks",
+        "50000"
+      ]
     }
   ]
 }
