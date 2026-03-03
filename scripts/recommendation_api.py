@@ -81,7 +81,7 @@ le AS (
         COUNT(*)::BIGINT AS popularity_30d
     FROM music.listen_events le
     WHERE track_name IS NOT NULL
-      AND lower(track_name) LIKE '%' || (SELECT query_lower FROM q) || '%'
+      AND lower(track_name) LIKE '%%' || (SELECT query_lower FROM q) || '%%'
     GROUP BY COALESCE(track_id, '__unknown__'), COALESCE(NULLIF(track_name, ''), COALESCE(track_id, '__unknown__'))
 ),
 tc AS (
@@ -93,7 +93,7 @@ tc AS (
         0::BIGINT AS popularity_30d
     FROM music.track_catalog tc
     WHERE track_name IS NOT NULL
-      AND lower(track_name) LIKE '%' || (SELECT query_lower FROM q) || '%'
+      AND lower(track_name) LIKE '%%' || (SELECT query_lower FROM q) || '%%'
 ),
 combined AS (
     SELECT * FROM le
