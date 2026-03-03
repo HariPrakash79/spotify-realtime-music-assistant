@@ -293,7 +293,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument(
         "--model-version",
-        default=f"mf_ready_{dt.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}",
+        default=f"mf_ready_{dt.datetime.now(dt.UTC).strftime('%Y%m%dT%H%M%SZ')}",
         help="Model version tag stored with recommendations.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Train and print metrics without DB write.")
@@ -346,4 +346,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

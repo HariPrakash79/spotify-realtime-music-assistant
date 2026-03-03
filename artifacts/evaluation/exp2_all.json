@@ -1,0 +1,62 @@
+{
+  "k": 20,
+  "holdout_size": 5,
+  "min_user_events": 20,
+  "target_mode": "novel",
+  "mf_eval_mode": "temporal_retrain",
+  "users_in_holdout": 68,
+  "results": [
+    {
+      "source": "pop",
+      "users_evaluated": 68,
+      "users_with_recs": 68,
+      "user_coverage": 1.0,
+      "precision_at_k": 0.0007352941176470588,
+      "recall_at_k": 0.007352941176470588,
+      "ndcg_at_k": 0.009016870481844977,
+      "hit_rate_at_k": 0.014705882352941176,
+      "item_coverage_at_k": 0.000752823086574655,
+      "personalization_at_k": 0.12845887675513606,
+      "readable_rate_at_k": 1.0
+    },
+    {
+      "source": "mf",
+      "users_evaluated": 68,
+      "users_with_recs": 68,
+      "user_coverage": 1.0,
+      "precision_at_k": 0.0007352941176470588,
+      "recall_at_k": 0.007352941176470588,
+      "ndcg_at_k": 0.0038833547437145716,
+      "hit_rate_at_k": 0.014705882352941176,
+      "item_coverage_at_k": 0.00591925603365562,
+      "personalization_at_k": 0.8759782001096006,
+      "readable_rate_at_k": 1.0
+    },
+    {
+      "source": "hybrid",
+      "users_evaluated": 68,
+      "users_with_recs": 68,
+      "user_coverage": 1.0,
+      "precision_at_k": 0.0007352941176470588,
+      "recall_at_k": 0.007352941176470588,
+      "ndcg_at_k": 0.0056890118710962,
+      "hit_rate_at_k": 0.014705882352941176,
+      "item_coverage_at_k": 0.004782640785297808,
+      "personalization_at_k": 0.8358848177419153,
+      "readable_rate_at_k": 1.0
+    },
+    {
+      "source": "dense",
+      "users_evaluated": 68,
+      "users_with_recs": 6,
+      "user_coverage": 0.08823529411764706,
+      "precision_at_k": 0.0,
+      "recall_at_k": 0.0,
+      "ndcg_at_k": 0.0,
+      "hit_rate_at_k": 0.0,
+      "item_coverage_at_k": 0.0005756882426747362,
+      "personalization_at_k": 0.3794314110103584,
+      "readable_rate_at_k": 1.0
+    }
+  ]
+}

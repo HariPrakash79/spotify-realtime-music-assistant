@@ -289,6 +289,48 @@ Or use ready SQL snippets in:
 
 `queries/recommendations.sql`
 
+## Recommendation-ready ML workflow
+
+The project now supports:
+
+- recommendation-ready filtering (`music.v_listen_events_recommendation_ready`)
+- human-friendly user names (`music.user_profiles`)
+- ML recommendations via matrix factorization (`music.v_user_recommendations_mf_ready`)
+
+Generate display names (writes `artifacts/user_profiles/user_names.txt`):
+
+```powershell
+python scripts/generate_user_profiles.py --max-users 1000
+```
+
+Train MF recommendations (writes to `music.user_recommendations_mf_ready`):
+
+```powershell
+python scripts/train_personalized_mf.py --epochs 8 --factors 48 --top-k 100
+```
+
+Evaluate recommendation quality (temporal holdout):
+
+```powershell
+python scripts/evaluate_recommendation_quality.py --source both --k 20 --holdout-size 5 --min-user-events 20
+```
+
+Evaluation outputs:
+
+- `artifacts/evaluation/recommendation_quality.json`
+- `artifacts/evaluation/recommendation_quality.md`
+
+Metrics reported:
+
+- `precision@k`
+- `recall@k`
+- `ndcg@k`
+- `hit_rate@k`
+- `item_coverage@k`
+- `user_coverage`
+- `personalization@k`
+- `readable_rate@k`
+
 ## Recommendation API (serving layer)
 
 Install dependencies:

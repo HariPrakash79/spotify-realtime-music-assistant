@@ -1,0 +1,69 @@
+{
+  "k": 20,
+  "holdout_size": 5,
+  "min_user_events": 20,
+  "target_mode": "novel",
+  "mf_eval_mode": "temporal_retrain",
+  "candidate_top_n": 10000,
+  "hybrid_weights": {
+    "mf": 0.65,
+    "pop": 0.25,
+    "artist": 0.1,
+    "grid": "0.80,0.15,0.05;0.70,0.20,0.10;0.65,0.25,0.10;0.55,0.35,0.10"
+  },
+  "users_in_holdout": 18,
+  "results": [
+    {
+      "source": "pop",
+      "users_evaluated": 18,
+      "users_with_recs": 18,
+      "user_coverage": 1.0,
+      "precision_at_k": 0.002777777777777778,
+      "recall_at_k": 0.05555555555555555,
+      "ndcg_at_k": 0.05555555555555555,
+      "hit_rate_at_k": 0.05555555555555555,
+      "item_coverage_at_k": 0.0028,
+      "personalization_at_k": 0.11145241778944537,
+      "readable_rate_at_k": 1.0
+    },
+    {
+      "source": "mf",
+      "users_evaluated": 18,
+      "users_with_recs": 18,
+      "user_coverage": 1.0,
+      "precision_at_k": 0.0,
+      "recall_at_k": 0.0,
+      "ndcg_at_k": 0.0,
+      "hit_rate_at_k": 0.0,
+      "item_coverage_at_k": 0.0239,
+      "personalization_at_k": 0.9431413458002422,
+      "readable_rate_at_k": 1.0
+    },
+    {
+      "source": "hybrid(w=0.55,0.35,0.10)",
+      "users_evaluated": 18,
+      "users_with_recs": 18,
+      "user_coverage": 1.0,
+      "precision_at_k": 0.002777777777777778,
+      "recall_at_k": 0.05555555555555555,
+      "ndcg_at_k": 0.015013230801517764,
+      "hit_rate_at_k": 0.05555555555555555,
+      "item_coverage_at_k": 0.0185,
+      "personalization_at_k": 0.8669399407415477,
+      "readable_rate_at_k": 1.0
+    },
+    {
+      "source": "dense",
+      "users_evaluated": 18,
+      "users_with_recs": 1,
+      "user_coverage": 0.05555555555555555,
+      "precision_at_k": 0.0,
+      "recall_at_k": 0.0,
+      "ndcg_at_k": 0.0,
+      "hit_rate_at_k": 0.0,
+      "item_coverage_at_k": 0.002,
+      "personalization_at_k": 0.0,
+      "readable_rate_at_k": 1.0
+    }
+  ]
+}

@@ -193,6 +193,52 @@
       "program": "${workspaceFolder}/scripts/langchain_bedrock_assistant.py",
       "console": "integratedTerminal",
       "envFile": "${workspaceFolder}/.env"
+    },
+    {
+      "name": "Generate User Profiles (Real Names)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/generate_user_profiles.py",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "args": [
+        "--max-users",
+        "1000"
+      ]
+    },
+    {
+      "name": "Train Personalized MF Model",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/train_personalized_mf.py",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "args": [
+        "--epochs",
+        "8",
+        "--factors",
+        "48",
+        "--top-k",
+        "100"
+      ]
+    },
+    {
+      "name": "Evaluate Recommendation Quality",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/evaluate_recommendation_quality.py",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "args": [
+        "--source",
+        "both",
+        "--k",
+        "20",
+        "--holdout-size",
+        "5",
+        "--min-user-events",
+        "20"
+      ]
     }
   ]
 }

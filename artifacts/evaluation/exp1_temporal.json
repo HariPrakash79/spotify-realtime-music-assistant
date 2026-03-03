@@ -1,0 +1,23 @@
+{
+  "k": 20,
+  "holdout_size": 5,
+  "min_user_events": 20,
+  "target_mode": "novel",
+  "mf_eval_mode": "temporal_retrain",
+  "users_in_holdout": 68,
+  "results": [
+    {
+      "source": "mf",
+      "users_evaluated": 68,
+      "users_with_recs": 68,
+      "user_coverage": 1.0,
+      "precision_at_k": 0.0007352941176470588,
+      "recall_at_k": 0.007352941176470588,
+      "ndcg_at_k": 0.0038833547437145716,
+      "hit_rate_at_k": 0.014705882352941176,
+      "item_coverage_at_k": 0.00591925603365562,
+      "personalization_at_k": 0.8759782001096006,
+      "readable_rate_at_k": 1.0
+    }
+  ]
+}
