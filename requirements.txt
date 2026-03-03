@@ -3,7 +3,11 @@ PyYAML==6.0.2
 requests==2.32.3
 pandas==2.3.2
 pyarrow==21.0.0
+numpy>=1.26,<3.0
 kafka-python==2.1.2
 psycopg[binary]==3.2.10
 fastapi==0.116.1
 uvicorn==0.35.0
+openai>=1.0.0,<2.0.0
+langchain>=0.3.0,<0.4.0
+langchain-aws>=0.2.0,<0.3.0

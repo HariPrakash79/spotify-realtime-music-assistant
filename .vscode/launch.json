@@ -169,6 +169,30 @@
       "request": "launch",
       "program": "${workspaceFolder}/scripts/chat_assistant.py",
       "console": "integratedTerminal"
+    },
+    {
+      "name": "Run LLM Music Assistant",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/llm_music_assistant.py",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env"
+    },
+    {
+      "name": "Run Bedrock Music Assistant",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/bedrock_music_assistant.py",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env"
+    },
+    {
+      "name": "Run LangChain Bedrock Assistant",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/langchain_bedrock_assistant.py",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env"
     }
   ]
 }

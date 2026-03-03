@@ -379,6 +379,71 @@ Behavior:
 - If a requested song is not found, assistant asks for vibe and returns closest vibe-based songs.
 - If there is no user context, assistant falls back to trending.
 
+### LLM Music Assistant (Tool-Calling)
+
+Run the API first:
+
+```powershell
+python scripts/recommendation_api.py
+```
+
+Set LLM env vars:
+
+```powershell
+$env:OPENAI_API_KEY="your_openai_api_key"
+$env:OPENAI_MODEL="gpt-4o-mini"
+```
+
+Run LLM assistant:
+
+```powershell
+python scripts/llm_music_assistant.py
+```
+
+What it does:
+- Uses OpenAI chat with tool-calling.
+- Calls your real endpoints (`/recs`, `/trending`, `/search/tracks`, `/vibe`, `/feedback/vibe`).
+- Returns grounded answers from your project data instead of made-up songs.
+
+### Bedrock Music Assistant (Tool-Calling)
+
+If you prefer AWS credits over OpenAI billing, use Bedrock assistant.
+
+Prerequisite:
+- Enable model access in Amazon Bedrock for your account/region.
+
+Set env vars:
+
+```powershell
+$env:AWS_PROFILE="spotify"
+$env:AWS_REGION="us-east-1"
+$env:BEDROCK_REGION="us-east-1"
+$env:BEDROCK_MODEL_ID="anthropic.claude-3-haiku-20240307-v1:0"
+```
+
+Run:
+
+```powershell
+python scripts/bedrock_music_assistant.py
+```
+
+Notes:
+- Keep `python scripts/recommendation_api.py` running in another terminal.
+- If Bedrock returns access errors, grant model access in Bedrock console first.
+
+### LangChain + Bedrock Assistant
+
+If you want LangChain orchestration, run:
+
+```powershell
+python scripts/langchain_bedrock_assistant.py
+```
+
+It uses:
+- `langchain`
+- `langchain-aws`
+- Bedrock chat model + tool calls mapped to your live API-backed functions.
+
 ## Data targets and progress check
 
 Current project goals:

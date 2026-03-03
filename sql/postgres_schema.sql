@@ -207,6 +207,57 @@ FROM music.listen_events le
 JOIN music.v_model_users_1000 mu
   ON mu.user_id = le.user_id;
 
+-- Recommendation-ready slice:
+-- strict metadata quality filter for user-facing recommendation quality.
+CREATE OR REPLACE VIEW music.v_listen_events_recommendation_ready AS
+SELECT
+    le.*
+FROM music.listen_events le
+WHERE le.event_type = 'play'
+  AND COALESCE(le.user_id, '') <> ''
+  AND COALESCE(le.track_id, '') <> ''
+  AND COALESCE(le.track_name, '') <> ''
+  AND COALESCE(le.artist_name, '') <> ''
+  AND lower(le.artist_name) <> '__unknown_artist__'
+  AND le.track_name <> le.track_id
+  AND le.track_name !~ '^[0-9]+$';
+
+CREATE OR REPLACE VIEW music.v_model_users_1000_ready AS
+WITH user_counts AS (
+    SELECT
+        user_id,
+        COUNT(*)::BIGINT AS plays
+    FROM music.v_listen_events_recommendation_ready
+    GROUP BY user_id
+),
+ranked AS (
+    SELECT
+        user_id,
+        plays,
+        ROW_NUMBER() OVER (ORDER BY plays DESC, user_id) AS rn
+    FROM user_counts
+)
+SELECT
+    user_id,
+    plays
+FROM ranked
+WHERE rn <= 1000;
+
+CREATE OR REPLACE VIEW music.v_listen_events_model_1000_ready AS
+SELECT
+    le.*
+FROM music.v_listen_events_recommendation_ready le
+JOIN music.v_model_users_1000_ready mu
+  ON mu.user_id = le.user_id;
+
+CREATE OR REPLACE VIEW music.v_model_metrics_1000_ready AS
+SELECT
+    COUNT(*)::BIGINT AS events,
+    COUNT(DISTINCT user_id)::BIGINT AS users,
+    COUNT(DISTINCT track_id)::BIGINT AS tracks,
+    ROUND(COUNT(*)::NUMERIC / NULLIF(COUNT(DISTINCT user_id), 0), 2) AS events_per_user
+FROM music.v_listen_events_model_1000_ready;
+
 CREATE OR REPLACE VIEW music.v_model_metrics_1000 AS
 SELECT
     COUNT(*)::BIGINT AS events,
@@ -320,6 +371,44 @@ SELECT
     last_play_ts
 FROM ranked;
 
+CREATE OR REPLACE VIEW music.v_user_top_artists_30d_ready AS
+WITH anchor AS (
+    SELECT MAX(event_ts) AS max_event_ts
+    FROM music.v_listen_events_recommendation_ready
+),
+agg AS (
+    SELECT
+        le.user_id,
+        le.artist_id,
+        COALESCE(MAX(NULLIF(le.artist_name, '')), '__unknown_artist__') AS artist_name,
+        COUNT(*)::BIGINT AS plays_30d,
+        COUNT(DISTINCT le.track_id)::BIGINT AS unique_tracks_30d,
+        MAX(le.event_ts) AS last_play_ts
+    FROM music.v_listen_events_recommendation_ready le
+    CROSS JOIN anchor a
+    WHERE a.max_event_ts IS NOT NULL
+      AND le.event_ts >= a.max_event_ts - INTERVAL '30 days'
+    GROUP BY le.user_id, le.artist_id
+),
+ranked AS (
+    SELECT
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY user_id
+            ORDER BY plays_30d DESC, unique_tracks_30d DESC, last_play_ts DESC, artist_id
+        ) AS rank_in_user
+    FROM agg
+)
+SELECT
+    user_id,
+    rank_in_user,
+    artist_id,
+    artist_name,
+    plays_30d,
+    unique_tracks_30d,
+    last_play_ts
+FROM ranked;
+
 CREATE OR REPLACE VIEW music.v_track_popularity_7d AS
 WITH anchor AS (
     SELECT MAX(event_ts) AS max_event_ts
@@ -355,6 +444,53 @@ WITH ranked AS (
             ORDER BY plays_7d DESC, unique_listeners_7d DESC, last_play_ts DESC, track_id_key
         ) AS global_rank_7d
     FROM music.v_track_popularity_7d
+    WHERE track_id IS NOT NULL
+)
+SELECT
+    global_rank_7d,
+    track_id,
+    track_name,
+    artist_id,
+    artist_name,
+    plays_7d,
+    unique_listeners_7d,
+    last_play_ts
+FROM ranked;
+
+CREATE OR REPLACE VIEW music.v_track_popularity_7d_ready AS
+WITH anchor AS (
+    SELECT MAX(event_ts) AS max_event_ts
+    FROM music.v_listen_events_recommendation_ready
+)
+SELECT
+    le.track_id AS track_id_key,
+    MAX(le.track_id) AS track_id,
+    MAX(le.track_name) AS track_name,
+    MAX(le.artist_id) AS artist_id,
+    MAX(le.artist_name) AS artist_name,
+    COUNT(*)::BIGINT AS plays_7d,
+    COUNT(DISTINCT le.user_id)::BIGINT AS unique_listeners_7d,
+    MAX(le.event_ts) AS last_play_ts
+FROM music.v_listen_events_recommendation_ready le
+CROSS JOIN anchor a
+WHERE a.max_event_ts IS NOT NULL
+  AND le.event_ts >= a.max_event_ts - INTERVAL '7 days'
+GROUP BY le.track_id;
+
+CREATE OR REPLACE VIEW music.v_global_trending_tracks_7d_ready AS
+WITH ranked AS (
+    SELECT
+        track_id,
+        track_name,
+        artist_id,
+        artist_name,
+        plays_7d,
+        unique_listeners_7d,
+        last_play_ts,
+        ROW_NUMBER() OVER (
+            ORDER BY plays_7d DESC, unique_listeners_7d DESC, last_play_ts DESC, track_id_key
+        ) AS global_rank_7d
+    FROM music.v_track_popularity_7d_ready
     WHERE track_id IS NOT NULL
 )
 SELECT
@@ -540,3 +676,223 @@ SELECT
 FROM music.v_user_recommendations_30d r
 JOIN music.v_model_users_1000 mu
   ON mu.user_id = r.user_id;
+
+CREATE OR REPLACE VIEW music.v_user_recommendations_30d_ready AS
+WITH anchor AS (
+    SELECT MAX(event_ts) AS max_event_ts
+    FROM music.v_listen_events_recommendation_ready
+),
+active_users AS (
+    SELECT DISTINCT
+        le.user_id
+    FROM music.v_listen_events_recommendation_ready le
+    CROSS JOIN anchor a
+    WHERE a.max_event_ts IS NOT NULL
+      AND le.event_ts >= a.max_event_ts - INTERVAL '30 days'
+),
+user_played AS (
+    SELECT DISTINCT
+        le.user_id,
+        le.track_id
+    FROM music.v_listen_events_recommendation_ready le
+    CROSS JOIN anchor a
+    WHERE a.max_event_ts IS NOT NULL
+      AND le.event_ts >= a.max_event_ts - INTERVAL '30 days'
+),
+user_top_artists AS (
+    SELECT
+        user_id,
+        artist_id,
+        rank_in_user
+    FROM music.v_user_top_artists_30d_ready
+    WHERE rank_in_user <= 5
+      AND artist_id IS NOT NULL
+),
+artist_track_pop AS (
+    SELECT
+        le.artist_id,
+        le.track_id,
+        MAX(le.track_name) AS track_name,
+        MAX(le.artist_name) AS artist_name,
+        COUNT(*)::BIGINT AS plays_30d
+    FROM music.v_listen_events_recommendation_ready le
+    CROSS JOIN anchor a
+    WHERE a.max_event_ts IS NOT NULL
+      AND le.event_ts >= a.max_event_ts - INTERVAL '30 days'
+    GROUP BY le.artist_id, le.track_id
+),
+candidates AS (
+    SELECT
+        uta.user_id,
+        atp.track_id,
+        atp.track_name,
+        uta.artist_id,
+        atp.artist_name,
+        uta.rank_in_user AS artist_affinity_rank,
+        atp.plays_30d AS track_popularity_30d,
+        (atp.plays_30d::NUMERIC * (1.0 / uta.rank_in_user)) AS recommendation_score
+    FROM user_top_artists uta
+    JOIN artist_track_pop atp
+      ON uta.artist_id = atp.artist_id
+    LEFT JOIN user_played up
+      ON up.user_id = uta.user_id
+     AND up.track_id = atp.track_id
+    WHERE up.user_id IS NULL
+      AND atp.track_id IS NOT NULL
+),
+dedup AS (
+    SELECT
+        user_id,
+        track_id,
+        MAX(track_name) AS track_name,
+        MAX(artist_id) AS artist_id,
+        MAX(artist_name) AS artist_name,
+        MIN(artist_affinity_rank) AS artist_affinity_rank,
+        MAX(track_popularity_30d) AS track_popularity_30d,
+        MAX(recommendation_score) AS recommendation_score
+    FROM candidates
+    GROUP BY user_id, track_id
+),
+ranked_personalized AS (
+    SELECT
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY user_id
+            ORDER BY recommendation_score DESC, track_popularity_30d DESC, track_id
+        ) AS recommendation_rank
+    FROM dedup
+),
+personalized_counts AS (
+    SELECT
+        user_id,
+        COUNT(*)::BIGINT AS personalized_count
+    FROM ranked_personalized
+    GROUP BY user_id
+),
+fallback_candidates AS (
+    SELECT
+        u.user_id,
+        gt.track_id,
+        gt.track_name,
+        gt.artist_id,
+        gt.artist_name,
+        NULL::BIGINT AS artist_affinity_rank,
+        gt.plays_7d::BIGINT AS track_popularity_30d,
+        ((gt.plays_7d::NUMERIC * 0.001) + (1.0 / (1000 + gt.global_rank_7d))) AS recommendation_score,
+        gt.global_rank_7d
+    FROM active_users u
+    JOIN music.v_global_trending_tracks_7d_ready gt
+      ON TRUE
+    LEFT JOIN user_played up
+      ON up.user_id = u.user_id
+     AND up.track_id = gt.track_id
+    LEFT JOIN dedup d
+      ON d.user_id = u.user_id
+     AND d.track_id = gt.track_id
+    WHERE up.user_id IS NULL
+      AND d.user_id IS NULL
+      AND gt.track_id IS NOT NULL
+),
+ranked_fallback AS (
+    SELECT
+        fc.user_id,
+        (COALESCE(pc.personalized_count, 0) + ROW_NUMBER() OVER (
+            PARTITION BY fc.user_id
+            ORDER BY fc.global_rank_7d, fc.track_id
+        )) AS recommendation_rank,
+        fc.track_id,
+        fc.track_name,
+        fc.artist_id,
+        fc.artist_name,
+        fc.artist_affinity_rank,
+        fc.track_popularity_30d,
+        fc.recommendation_score
+    FROM fallback_candidates fc
+    LEFT JOIN personalized_counts pc
+      ON pc.user_id = fc.user_id
+)
+SELECT
+    user_id,
+    recommendation_rank,
+    track_id,
+    track_name,
+    artist_id,
+    artist_name,
+    artist_affinity_rank,
+    track_popularity_30d,
+    recommendation_score
+FROM ranked_personalized
+UNION ALL
+SELECT
+    user_id,
+    recommendation_rank,
+    track_id,
+    track_name,
+    artist_id,
+    artist_name,
+    artist_affinity_rank,
+    track_popularity_30d,
+    recommendation_score
+FROM ranked_fallback;
+
+CREATE OR REPLACE VIEW music.v_user_recommendations_30d_dense_1000_ready AS
+SELECT
+    r.*
+FROM music.v_user_recommendations_30d_ready r
+JOIN music.v_model_users_1000_ready mu
+  ON mu.user_id = r.user_id;
+
+-- ML-based personalized recommendation storage (trained offline, served online).
+CREATE TABLE IF NOT EXISTS music.user_recommendations_mf_ready (
+    model_version        TEXT NOT NULL,
+    user_id              TEXT NOT NULL,
+    recommendation_rank  INTEGER NOT NULL,
+    track_id             TEXT NOT NULL,
+    track_name           TEXT,
+    artist_name          TEXT,
+    recommendation_score DOUBLE PRECISION NOT NULL,
+    generated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (model_version, user_id, recommendation_rank)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_recs_mf_ready_user
+    ON music.user_recommendations_mf_ready (user_id, generated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_user_recs_mf_ready_model
+    ON music.user_recommendations_mf_ready (model_version, user_id, recommendation_rank);
+
+CREATE OR REPLACE VIEW music.v_user_recommendations_mf_ready AS
+WITH latest AS (
+    SELECT model_version
+    FROM music.user_recommendations_mf_ready
+    ORDER BY generated_at DESC
+    LIMIT 1
+)
+SELECT
+    r.user_id,
+    r.recommendation_rank,
+    r.track_id,
+    r.track_name,
+    NULL::TEXT AS artist_id,
+    r.artist_name,
+    r.recommendation_score
+FROM music.user_recommendations_mf_ready r
+JOIN latest l
+  ON l.model_version = r.model_version;
+
+-- Human-friendly user names for demos/chatbots/UI while preserving stable user_id keys.
+CREATE TABLE IF NOT EXISTS music.user_profiles (
+    user_id       TEXT PRIMARY KEY,
+    display_name  TEXT NOT NULL UNIQUE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE OR REPLACE VIEW music.v_model_users_1000_ready_named AS
+SELECT
+    mu.user_id,
+    mu.plays,
+    COALESCE(up.display_name, mu.user_id) AS display_name
+FROM music.v_model_users_1000_ready mu
+LEFT JOIN music.user_profiles up
+  ON up.user_id = mu.user_id;

@@ -24,6 +24,9 @@ from psycopg.rows import dict_row
 CONSENSUS_MIN_USERS = int(os.environ.get("VIBE_FEEDBACK_MIN_USERS", "15"))
 CONSENSUS_MIN_TOP_SHARE = float(os.environ.get("VIBE_FEEDBACK_MIN_TOP_SHARE", "0.70"))
 CONSENSUS_MIN_MARGIN = float(os.environ.get("VIBE_FEEDBACK_MIN_MARGIN", "0.15"))
+READABLE_SCAN_MIN = int(os.environ.get("READABLE_SCAN_MIN", "500"))
+READABLE_SCAN_MULTIPLIER = int(os.environ.get("READABLE_SCAN_MULTIPLIER", "80"))
+USE_ML_RECS = os.environ.get("USE_ML_RECS", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
 MODEL_METRICS_SQL = """
@@ -32,7 +35,7 @@ SELECT
     users,
     tracks,
     events_per_user
-FROM music.v_model_metrics_1000
+FROM music.v_model_metrics_1000_ready
 """
 
 
@@ -45,9 +48,146 @@ SELECT
     artist_name,
     plays_7d,
     unique_listeners_7d
-FROM music.v_global_trending_tracks_7d
+FROM music.v_global_trending_tracks_7d_ready
 WHERE global_rank_7d <= %s
 ORDER BY global_rank_7d
+"""
+
+NAMED_TRENDING_SQL = """
+WITH
+named AS (
+    SELECT
+        MIN(NULLIF(track_id, '')) AS track_id,
+        MIN(NULLIF(artist_id, '')) AS artist_id,
+        track_name,
+        artist_name,
+        COUNT(*)::BIGINT AS plays_all_time,
+        COUNT(DISTINCT user_id)::BIGINT AS unique_listeners_all_time,
+        MAX(event_ts) AS last_play_ts_all_time
+    FROM music.v_listen_events_recommendation_ready le
+    WHERE le.event_type = 'play'
+      AND COALESCE(le.track_name, '') <> ''
+      AND COALESCE(le.artist_name, '') <> ''
+      AND le.artist_name <> '__unknown_artist__'
+      AND (le.track_id IS NULL OR le.track_name <> le.track_id)
+      AND le.track_name !~ '^[0-9]+$'
+    GROUP BY track_name, artist_name
+),
+ranked AS (
+    SELECT
+        ROW_NUMBER() OVER (
+            ORDER BY plays_all_time DESC, unique_listeners_all_time DESC, last_play_ts_all_time DESC, track_name, artist_name
+        ) AS global_rank_7d,
+        COALESCE(track_id, track_name) AS track_id,
+        track_name,
+        artist_id,
+        artist_name,
+        plays_all_time AS plays_7d,
+        unique_listeners_all_time AS unique_listeners_7d
+    FROM named
+)
+SELECT
+    global_rank_7d,
+    track_id,
+    track_name,
+    artist_id,
+    artist_name,
+    plays_7d,
+    unique_listeners_7d
+FROM ranked
+WHERE global_rank_7d <= %s
+ORDER BY global_rank_7d
+"""
+
+VIBE_NAMED_FALLBACK_SQL = """
+WITH
+named AS (
+    SELECT
+        MIN(NULLIF(le.track_id, '')) AS track_id,
+        MIN(NULLIF(le.artist_id, '')) AS artist_id,
+        le.track_name,
+        le.artist_name,
+        COUNT(*)::BIGINT AS plays_all_time,
+        COUNT(DISTINCT le.user_id)::BIGINT AS unique_listeners_all_time
+    FROM music.v_listen_events_recommendation_ready le
+    WHERE le.event_type = 'play'
+      AND COALESCE(le.track_name, '') <> ''
+      AND COALESCE(le.artist_name, '') <> ''
+      AND le.artist_name <> '__unknown_artist__'
+      AND (le.track_id IS NULL OR le.track_name <> le.track_id)
+      AND le.track_name !~ '^[0-9]+$'
+    GROUP BY le.track_name, le.artist_name
+),
+catalog_norm AS (
+    SELECT
+        lower(COALESCE(track_name, '')) AS track_name_l,
+        lower(COALESCE(artist_name, '')) AS artist_name_l,
+        lower(COALESCE(genre, '')) AS genre_l
+    FROM music.track_catalog
+    WHERE COALESCE(track_name, '') <> ''
+),
+enriched AS (
+    SELECT
+        n.track_id,
+        n.track_name,
+        n.artist_id,
+        n.artist_name,
+        n.plays_all_time,
+        n.unique_listeners_all_time,
+        COALESCE(MAX(NULLIF(cn.genre_l, '')), '') AS genre_l,
+        lower(n.track_name) AS track_name_l,
+        lower(n.artist_name) AS artist_name_l
+    FROM named n
+    LEFT JOIN catalog_norm cn
+      ON cn.track_name_l = lower(n.track_name)
+     AND (
+         cn.artist_name_l = lower(n.artist_name)
+         OR cn.artist_name_l = ''
+         OR lower(n.artist_name) = ''
+     )
+    GROUP BY
+        n.track_id,
+        n.track_name,
+        n.artist_id,
+        n.artist_name,
+        n.plays_all_time,
+        n.unique_listeners_all_time
+),
+scored AS (
+    SELECT
+        e.track_id,
+        e.track_name,
+        e.artist_id,
+        e.artist_name,
+        e.plays_all_time,
+        e.unique_listeners_all_time,
+        (
+            SELECT MAX(
+                CASE
+                    WHEN e.genre_l LIKE concat(chr(37), kw, chr(37)) THEN 3
+                    WHEN e.track_name_l LIKE concat(chr(37), kw, chr(37)) THEN 2
+                    WHEN e.artist_name_l LIKE concat(chr(37), kw, chr(37)) THEN 1
+                    ELSE 0
+                END
+            )
+            FROM unnest(%s::text[]) kw
+        ) AS vibe_match_score
+    FROM enriched e
+)
+SELECT
+    ROW_NUMBER() OVER (
+        ORDER BY vibe_match_score DESC, plays_all_time DESC, unique_listeners_all_time DESC, track_name, artist_name
+    ) AS global_rank_7d,
+    COALESCE(track_id, track_name) AS track_id,
+    track_name,
+    artist_id,
+    artist_name,
+    plays_all_time AS plays_7d,
+    unique_listeners_all_time AS unique_listeners_7d
+FROM scored
+WHERE vibe_match_score > 0
+ORDER BY global_rank_7d
+LIMIT %s
 """
 
 
@@ -60,10 +200,49 @@ SELECT
     artist_id,
     artist_name,
     recommendation_score
-FROM music.v_user_recommendations_30d_dense_1000
+FROM music.v_user_recommendations_30d_dense_1000_ready
 WHERE user_id = %s
   AND recommendation_rank <= %s
 ORDER BY recommendation_rank
+"""
+
+USER_RECS_MF_SQL = """
+SELECT
+    user_id,
+    recommendation_rank,
+    track_id,
+    track_name,
+    artist_id,
+    artist_name,
+    recommendation_score
+FROM music.v_user_recommendations_mf_ready
+WHERE user_id = %s
+  AND recommendation_rank <= %s
+ORDER BY recommendation_rank
+"""
+
+USER_EXISTS_SQL = """
+SELECT 1
+FROM music.v_model_users_1000_ready
+WHERE user_id = %s
+LIMIT 1
+"""
+
+USER_FROM_DISPLAY_SQL = """
+SELECT
+    user_id,
+    display_name
+FROM music.user_profiles
+WHERE lower(display_name) = lower(%s)
+LIMIT 1
+"""
+
+DISPLAY_FROM_USER_SQL = """
+SELECT
+    display_name
+FROM music.user_profiles
+WHERE user_id = %s
+LIMIT 1
 """
 
 SEARCH_TRACKS_SQL = """
@@ -79,9 +258,9 @@ le AS (
         COALESCE(MAX(NULLIF(artist_name, '')), '__unknown_artist__') AS artist_name,
         NULL::text AS genre,
         COUNT(*)::BIGINT AS popularity_30d
-    FROM music.listen_events le
+    FROM music.v_listen_events_recommendation_ready le
     WHERE track_name IS NOT NULL
-      AND lower(track_name) LIKE '%%' || (SELECT query_lower FROM q) || '%%'
+      AND lower(track_name) LIKE concat(chr(37), (SELECT query_lower FROM q), chr(37))
     GROUP BY COALESCE(track_id, '__unknown__'), COALESCE(NULLIF(track_name, ''), COALESCE(track_id, '__unknown__'))
 ),
 tc AS (
@@ -93,7 +272,7 @@ tc AS (
         0::BIGINT AS popularity_30d
     FROM music.track_catalog tc
     WHERE track_name IS NOT NULL
-      AND lower(track_name) LIKE '%%' || (SELECT query_lower FROM q) || '%%'
+      AND lower(track_name) LIKE concat(chr(37), (SELECT query_lower FROM q), chr(37))
 ),
 combined AS (
     SELECT * FROM le
@@ -109,8 +288,8 @@ ranked AS (
         popularity_30d,
         CASE
             WHEN lower(track_name) = (SELECT query_lower FROM q) THEN 300
-            WHEN lower(track_name) LIKE (SELECT query_lower FROM q) || '%%' THEN 200
-            WHEN lower(track_name) LIKE '%%' || (SELECT query_lower FROM q) || '%%' THEN 100
+            WHEN lower(track_name) LIKE concat((SELECT query_lower FROM q), chr(37)) THEN 200
+            WHEN lower(track_name) LIKE concat(chr(37), (SELECT query_lower FROM q), chr(37)) THEN 100
             ELSE 0
         END AS match_score,
         ROW_NUMBER() OVER (
@@ -247,7 +426,7 @@ WITH pop AS (
     SELECT
         track_id,
         COUNT(*)::BIGINT AS plays_30d
-    FROM music.listen_events
+    FROM music.v_listen_events_recommendation_ready
     WHERE event_type = 'play'
     GROUP BY track_id
 )
@@ -265,7 +444,7 @@ WHERE tc.track_name IS NOT NULL
   AND EXISTS (
       SELECT 1
       FROM unnest(%s::text[]) kw
-      WHERE lower(tc.genre) LIKE '%%' || kw || '%%'
+      WHERE lower(tc.genre) LIKE concat(chr(37), kw, chr(37))
   )
 ORDER BY COALESCE(pop.plays_30d, 0) DESC, tc.track_name
 LIMIT %s
@@ -278,7 +457,7 @@ def vibe_keywords(vibe: str) -> List[str]:
         "chill": ["chill", "ambient", "downtempo", "lofi", "trip-hop"],
         "focus": ["instrumental", "classical", "ambient", "minimal"],
         "happy": ["pop", "dance", "funk", "disco"],
-        "sad": ["acoustic", "singer-songwriter", "blues", "piano"],
+        "sad": ["sad", "melancholy", "heartbreak", "breakup", "blues", "ballad", "emo"],
         "party": ["dance", "electronic", "house", "hip-hop"],
         "energetic": ["rock", "edm", "electronic", "metal", "drum"],
         "romantic": ["soul", "rnb", "jazz", "love"],
@@ -350,6 +529,51 @@ def fetch_rows(sql: str, params: tuple[Any, ...] = ()) -> List[Dict[str, Any]]:
 def fetch_one(sql: str, params: tuple[Any, ...] = ()) -> Dict[str, Any] | None:
     rows = fetch_rows(sql, params)
     return rows[0] if rows else None
+
+
+def resolve_user_reference(user_ref: str) -> tuple[str, str | None]:
+    direct = fetch_one(USER_EXISTS_SQL, (user_ref,))
+    if direct:
+        try:
+            display = fetch_one(DISPLAY_FROM_USER_SQL, (user_ref,))
+            return user_ref, (display["display_name"] if display else None)
+        except Exception:
+            return user_ref, None
+
+    try:
+        mapped = fetch_one(USER_FROM_DISPLAY_SQL, (user_ref,))
+        if mapped:
+            return mapped["user_id"], mapped["display_name"]
+    except Exception:
+        return user_ref, None
+
+    return user_ref, None
+
+
+def is_human_readable_track(row: Dict[str, Any]) -> bool:
+    artist = str(row.get("artist_name") or "").strip().lower()
+    track_name = str(row.get("track_name") or "").strip()
+    track_id = str(row.get("track_id") or "").strip()
+
+    if not track_name:
+        return False
+    if track_name.isdigit():
+        return False
+    if artist in {"", "__unknown_artist__"}:
+        return False
+    # If name is literally the id token, it's not user-friendly metadata.
+    if track_id and track_name == track_id:
+        return False
+    return True
+
+
+def readable_only(rows: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    return [r for r in rows if is_human_readable_track(r)][:limit]
+
+
+def scan_limit(limit: int, multiplier: int | None = None) -> int:
+    mul = multiplier if multiplier is not None else READABLE_SCAN_MULTIPLIER
+    return max(limit * max(mul, 1), READABLE_SCAN_MIN, limit)
 
 
 class VibeFeedbackRequest(BaseModel):
@@ -447,16 +671,34 @@ def get_model_metrics() -> Dict[str, Any]:
 
 @app.get("/trending")
 def get_trending(limit: int = Query(default=20, ge=1, le=200)) -> Dict[str, Any]:
+    limit_scan = scan_limit(limit)
     try:
-        rows = fetch_rows(TRENDING_SQL, (limit,))
+        rows = fetch_rows(TRENDING_SQL, (limit_scan,))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"trending query failed: {exc}")
 
-    return {
-        "mode": "trending_7d",
+    rows = readable_only(rows, limit)
+    mode = "trending_7d"
+    message = None
+    if not rows:
+        try:
+            rows = fetch_rows(NAMED_TRENDING_SQL, (limit,))
+            mode = "trending_7d_named_fallback"
+            if rows:
+                message = "Primary trending was ID-heavy; returned readable all-time metadata fallback."
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"trending named fallback failed: {exc}")
+
+    resp: Dict[str, Any] = {
+        "mode": mode,
         "count": len(rows),
         "items": rows,
     }
+    if message:
+        resp["message"] = message
+    if not rows:
+        resp["message"] = "No human-readable tracks available in current result slice."
+    return resp
 
 
 @app.get("/search/tracks")
@@ -464,15 +706,20 @@ def search_tracks(query: str = Query(..., min_length=1), limit: int = Query(defa
     cleaned = query.strip()
     if not cleaned:
         raise HTTPException(status_code=400, detail="query is required.")
+    limit_scan = scan_limit(limit, multiplier=30)
     try:
-        rows = fetch_rows(SEARCH_TRACKS_SQL, (cleaned, cleaned, limit))
+        rows = fetch_rows(SEARCH_TRACKS_SQL, (cleaned, cleaned, limit_scan))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"track search failed: {exc}")
-    return {
+    rows = readable_only(rows, limit)
+    resp: Dict[str, Any] = {
         "query": cleaned,
         "count": len(rows),
         "items": rows,
     }
+    if not rows:
+        resp["message"] = "No human-readable track metadata found for this query."
+    return resp
 
 
 @app.get("/vibe")
@@ -483,29 +730,32 @@ def get_vibe_tracks(vibe: str = Query(..., min_length=1), limit: int = Query(def
     labels = vibe_labels(cleaned)
     keywords = vibe_keywords(cleaned)
     rows: List[Dict[str, Any]] = []
+    limit_scan = scan_limit(limit, multiplier=100)
 
     # Preferred path: engineered vibe features table
     try:
-        rows = fetch_rows(VIBE_FEATURE_TRACKS_SQL, (labels, limit))
+        rows = fetch_rows(VIBE_FEATURE_TRACKS_SQL, (labels, limit_scan))
     except Exception as exc:
         # If engineered table is not built yet, continue with catalog/genre fallback.
         print(f"vibe feature query unavailable, falling back to catalog rules: {exc}")
         rows = []
-    if rows:
+    readable = readable_only(rows, limit)
+    if readable:
         return {
             "mode": "vibe_match_features",
             "vibe": cleaned,
             "labels": labels,
             "keywords": keywords,
-            "count": len(rows),
-            "items": rows,
+            "count": len(readable),
+            "items": readable,
         }
 
     # Fallback path: direct genre keyword search in track catalog.
     try:
-        fallback = fetch_rows(VIBE_CATALOG_FALLBACK_SQL, (keywords, limit))
+        fallback = fetch_rows(VIBE_CATALOG_FALLBACK_SQL, (keywords, limit_scan))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"vibe catalog fallback failed: {exc}")
+    fallback = readable_only(fallback, limit)
     if fallback:
         return {
             "mode": "vibe_match_catalog",
@@ -518,16 +768,49 @@ def get_vibe_tracks(vibe: str = Query(..., min_length=1), limit: int = Query(def
 
     # Last-resort fallback: trending tracks
     try:
-        trending = fetch_rows(TRENDING_SQL, (limit,))
+        vibe_named = fetch_rows(VIBE_NAMED_FALLBACK_SQL, (keywords, limit))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"vibe named keyword fallback failed: {exc}")
+    if vibe_named:
+        return {
+            "mode": "vibe_fallback_named_keyword",
+            "vibe": cleaned,
+            "labels": labels,
+            "keywords": keywords,
+            "count": len(vibe_named),
+            "items": vibe_named,
+            "message": "No direct vibe metadata found; returned best keyword-matched named tracks.",
+        }
+
+    # Last-resort fallback: generic named trending tracks
+    try:
+        trending = fetch_rows(TRENDING_SQL, (limit_scan,))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"vibe final fallback failed: {exc}")
+    trending = readable_only(trending, limit)
+    if not trending:
+        try:
+            trending = fetch_rows(NAMED_TRENDING_SQL, (limit,))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"vibe named fallback failed: {exc}")
+    if not trending:
+        return {
+            "mode": "vibe_no_readable_metadata",
+            "vibe": cleaned,
+            "labels": labels,
+            "keywords": keywords,
+            "count": 0,
+            "items": [],
+            "message": "No human-readable tracks available for this vibe in current dataset slice.",
+        }
     return {
-        "mode": "vibe_fallback_trending",
+        "mode": "vibe_fallback_named_trending",
         "vibe": cleaned,
         "labels": labels,
         "keywords": keywords,
         "count": len(trending),
         "items": trending,
+        "message": "No vibe-specific named tracks found; returned readable general tracks.",
     }
 
 
@@ -586,18 +869,50 @@ def get_recs(
     limit: int = Query(default=20, ge=1, le=200),
     fallback_to_trending: bool = Query(default=True),
 ) -> Dict[str, Any]:
-    try:
-        recs = fetch_rows(USER_RECS_DENSE_SQL, (user_id, limit))
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"recommendation query failed: {exc}")
+    requested_user_ref = user_id.strip()
+    looks_like_display_name = " " in requested_user_ref
+    resolved_user_id, display_name = resolve_user_reference(user_id)
+    unresolved_display_name = looks_like_display_name and display_name is None and resolved_user_id == requested_user_ref
+    limit_scan = scan_limit(limit, multiplier=50)
+    recs: List[Dict[str, Any]] = []
+    mode = "personalized_dense_1000"
+    source_errors: List[str] = []
+
+    if USE_ML_RECS:
+        try:
+            recs = fetch_rows(USER_RECS_MF_SQL, (resolved_user_id, limit_scan))
+            mode = "personalized_mf_ready"
+        except Exception as exc:
+            # Keep serving from rule-based model if ML table/view is not ready yet.
+            source_errors.append(f"mf:{exc}")
+            recs = []
+
+    if not recs:
+        try:
+            recs = fetch_rows(USER_RECS_DENSE_SQL, (resolved_user_id, limit_scan))
+            mode = "personalized_dense_1000"
+        except Exception as exc:
+            source_errors.append(f"dense:{exc}")
+            raise HTTPException(status_code=500, detail=f"recommendation query failed: {' | '.join(source_errors)}")
+
+    recs = readable_only(recs, limit)
 
     if recs:
-        return {
-            "user_id": user_id,
-            "mode": "personalized_dense_1000",
+        resp: Dict[str, Any] = {
+            "user_id": resolved_user_id,
+            "mode": mode,
             "count": len(recs),
             "items": recs,
         }
+        if display_name:
+            resp["user_display_name"] = display_name
+        if source_errors:
+            resp["note"] = "ML source unavailable in this run; served fallback recommendation source."
+        if unresolved_display_name:
+            resp["user_reference_note"] = (
+                "Display name was not found in music.user_profiles; interpreted input as raw user_id."
+            )
+        return resp
 
     if not fallback_to_trending:
         return {
@@ -608,17 +923,37 @@ def get_recs(
         }
 
     try:
-        fallback = fetch_rows(TRENDING_SQL, (limit,))
+        fallback = fetch_rows(TRENDING_SQL, (limit_scan,))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"fallback query failed: {exc}")
+    fallback = readable_only(fallback, limit)
+    mode = "fallback_trending"
+    message = "User not in dense personalization slice; returned global trending tracks."
+    if not fallback:
+        try:
+            fallback = fetch_rows(NAMED_TRENDING_SQL, (limit,))
+            if fallback:
+                mode = "fallback_named_trending"
+                message = "Personalized slice is ID-heavy; returned readable all-time named fallback."
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"named fallback query failed: {exc}")
 
-    return {
-        "user_id": user_id,
-        "mode": "fallback_trending",
-        "message": "User not in dense personalization slice; returned global trending tracks.",
+    resp: Dict[str, Any] = {
+        "user_id": resolved_user_id,
+        "mode": mode,
+        "message": message,
         "count": len(fallback),
         "items": fallback,
     }
+    if display_name:
+        resp["user_display_name"] = display_name
+    if unresolved_display_name:
+        resp["user_reference_note"] = (
+            "Display name was not found in music.user_profiles; interpreted input as raw user_id."
+        )
+    if not fallback:
+        resp["message"] = "No human-readable recommendations available for this user in current dataset slice."
+    return resp
 
 
 if __name__ == "__main__":
