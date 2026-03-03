@@ -57,6 +57,36 @@ CREATE INDEX IF NOT EXISTS idx_track_vibe_feedback_track
 CREATE INDEX IF NOT EXISTS idx_track_vibe_feedback_vibe
     ON music.track_vibe_feedback (user_selected_vibe);
 
+CREATE TABLE IF NOT EXISTS music.demo_interactions (
+    interaction_id        BIGSERIAL PRIMARY KEY,
+    user_id               TEXT NOT NULL,
+    track_id              TEXT,
+    action                TEXT NOT NULL,
+    source_endpoint       TEXT,
+    model_mode            TEXT,
+    model_version         TEXT,
+    recommendation_rank   INTEGER,
+    context_vibe          TEXT,
+    session_id            TEXT,
+    signal_strength       NUMERIC(6, 3) NOT NULL DEFAULT 1.000,
+    metadata              JSONB,
+    event_ts              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    inserted_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_demo_interactions_action_nonempty CHECK (length(trim(action)) > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_demo_interactions_user_ts
+    ON music.demo_interactions (user_id, event_ts DESC);
+
+CREATE INDEX IF NOT EXISTS idx_demo_interactions_track_ts
+    ON music.demo_interactions (track_id, event_ts DESC);
+
+CREATE INDEX IF NOT EXISTS idx_demo_interactions_action_ts
+    ON music.demo_interactions (action, event_ts DESC);
+
+CREATE INDEX IF NOT EXISTS idx_demo_interactions_session_ts
+    ON music.demo_interactions (session_id, event_ts DESC);
+
 CREATE TABLE IF NOT EXISTS music.track_vibe_overrides (
     track_id         TEXT PRIMARY KEY,
     vibe_label       TEXT NOT NULL,

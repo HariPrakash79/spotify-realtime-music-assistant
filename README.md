@@ -371,9 +371,11 @@ Endpoints:
 - `GET /metrics/recsource`
 - `GET /trending?limit=20`
 - `GET /recs/{user_id}?limit=20`
+- `GET /favorites/{user_id}?limit=20`
 - `GET /search/tracks?query=<song>&limit=10`
 - `GET /vibe?vibe=<chill|focus|happy|sad|party|energetic|romantic>&limit=10`
 - `POST /feedback/vibe`
+- `POST /feedback/interaction`
 
 Examples:
 
@@ -381,9 +383,11 @@ Examples:
 curl "http://localhost:8000/metrics/model"
 curl "http://localhost:8000/trending?limit=10"
 curl "http://localhost:8000/recs/user_000002?limit=20"
+curl "http://localhost:8000/favorites/user_000002?limit=20"
 curl "http://localhost:8000/search/tracks?query=Morning%20Child&limit=5"
 curl "http://localhost:8000/vibe?vibe=chill&limit=10"
 curl -X POST "http://localhost:8000/feedback/vibe" -H "Content-Type: application/json" -d "{\"user_id\":\"101617\",\"track_id\":\"45659\",\"user_selected_vibe\":\"energetic\",\"predicted_vibe\":\"chill\"}"
+curl -X POST "http://localhost:8000/feedback/interaction" -H "Content-Type: application/json" -d "{\"user_id\":\"101617\",\"track_id\":\"45659\",\"action\":\"like\",\"source_endpoint\":\"/recs\"}"
 ```
 
 Python client helper:
@@ -392,15 +396,48 @@ Python client helper:
 python scripts/recommendation_client.py --query metrics
 python scripts/recommendation_client.py --query trending --limit 10
 python scripts/recommendation_client.py --query recs --user-id 101617 --limit 20 --fallback-to-trending
+python scripts/recommendation_client.py --query favorites --user-id 101617 --limit 20
 python scripts/recommendation_client.py --query search --text "Morning Child" --limit 5
 python scripts/recommendation_client.py --query vibe --text chill --limit 10
 python scripts/recommendation_client.py --query feedback --user-id 101617 --track-id 45659 --vibe energetic --predicted-vibe chill
+python scripts/recommendation_client.py --query interaction --user-id 101617 --track-id 45659 --action like --source-endpoint /recs --rank 1
 ```
 
 Optional base URL override:
 
 ```powershell
 $env:RECOMMENDATION_API_BASE_URL="http://localhost:8000"
+```
+
+### Demo feedback loop for retraining
+
+Every recommendation response can now be captured as interaction data for later retraining.
+
+1. Apply latest schema so `music.demo_interactions` exists:
+
+```powershell
+python -c "import pathlib; from psycopg import connect; sql=pathlib.Path('sql/postgres_schema.sql').read_text(); conn=connect(); cur=conn.cursor(); cur.execute(sql); conn.commit(); conn.close(); print('schema updated')"
+```
+
+2. API auto-logs `impression` rows for:
+- `/recs/{user_id}`
+- `/favorites/{user_id}`
+- `/trending` (if `user_id` query param is provided)
+- `/vibe` (if `user_id` query param is provided)
+
+3. Explicit user actions can be posted via:
+- `POST /feedback/interaction` (`play`, `like`, `favorite`, `add_to_playlist`, `skip`, `dislike`, etc.)
+
+4. MF training can blend these demo interactions:
+
+```powershell
+python scripts/train_personalized_mf.py --include-demo-feedback --demo-feedback-boost 4.0
+```
+
+Disable blending if needed:
+
+```powershell
+python scripts/train_personalized_mf.py --no-demo-feedback
 ```
 
 ### Vibe Feature Engineering

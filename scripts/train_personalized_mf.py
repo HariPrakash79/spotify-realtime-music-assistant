@@ -47,6 +47,92 @@ HAVING COUNT(*) >= %s
 ORDER BY le.user_id, COUNT(*) DESC, le.track_id
 """
 
+FETCH_INTERACTIONS_WITH_FEEDBACK_SQL = """
+WITH model_users AS (
+    SELECT user_id
+    FROM music.v_model_users_1000_ready
+    ORDER BY plays DESC, user_id
+    LIMIT %s
+),
+base AS (
+    SELECT
+        le.user_id,
+        le.track_id,
+        MAX(le.track_name) AS track_name,
+        MAX(le.artist_name) AS artist_name,
+        COUNT(*)::NUMERIC AS base_plays
+    FROM music.v_listen_events_recommendation_ready le
+    JOIN model_users mu
+      ON mu.user_id = le.user_id
+    GROUP BY le.user_id, le.track_id
+),
+feedback AS (
+    SELECT
+        di.user_id,
+        di.track_id,
+        COALESCE(
+            MAX(NULLIF(tc.track_name, '')),
+            MAX(NULLIF(le.track_name, '')),
+            di.track_id
+        ) AS track_name,
+        COALESCE(
+            MAX(NULLIF(tc.artist_name, '')),
+            MAX(NULLIF(le.artist_name, '')),
+            '__unknown_artist__'
+        ) AS artist_name,
+        SUM(
+            CASE
+                WHEN di.action IN ('play', 'like', 'favorite', 'add_to_playlist') THEN GREATEST(di.signal_strength::NUMERIC, 0.10)
+                WHEN di.action = 'impression' THEN GREATEST(di.signal_strength::NUMERIC, 0.01)
+                WHEN di.action IN ('skip', 'dislike') THEN -1 * GREATEST(ABS(di.signal_strength::NUMERIC), 0.10)
+                ELSE 0::NUMERIC
+            END
+        ) AS feedback_score
+    FROM music.demo_interactions di
+    JOIN model_users mu
+      ON mu.user_id = di.user_id
+    LEFT JOIN music.track_catalog tc
+      ON tc.track_id = di.track_id
+    LEFT JOIN music.v_listen_events_recommendation_ready le
+      ON le.user_id = di.user_id
+     AND le.track_id = di.track_id
+    WHERE COALESCE(di.track_id, '') <> ''
+    GROUP BY di.user_id, di.track_id
+),
+merged AS (
+    SELECT
+        COALESCE(b.user_id, f.user_id) AS user_id,
+        COALESCE(b.track_id, f.track_id) AS track_id,
+        COALESCE(
+            NULLIF(b.track_name, ''),
+            NULLIF(f.track_name, ''),
+            COALESCE(b.track_id, f.track_id)
+        ) AS track_name,
+        COALESCE(
+            NULLIF(b.artist_name, ''),
+            NULLIF(f.artist_name, ''),
+            '__unknown_artist__'
+        ) AS artist_name,
+        GREATEST(
+            0::NUMERIC,
+            COALESCE(b.base_plays, 0::NUMERIC) + (%s::NUMERIC * COALESCE(f.feedback_score, 0::NUMERIC))
+        ) AS plays_score
+    FROM base b
+    FULL OUTER JOIN feedback f
+      ON f.user_id = b.user_id
+     AND f.track_id = b.track_id
+)
+SELECT
+    user_id,
+    track_id,
+    track_name,
+    artist_name,
+    CEIL(plays_score)::INTEGER AS plays
+FROM merged
+WHERE plays_score >= %s::NUMERIC
+ORDER BY user_id, plays DESC, track_id
+"""
+
 DELETE_MODEL_SQL = "DELETE FROM music.user_recommendations_mf_ready WHERE model_version = %s"
 
 INSERT_RECS_SQL = """
@@ -100,11 +186,28 @@ def connect_postgres():
     return connect(row_factory=dict_row, **kwargs)
 
 
-def fetch_interactions(max_users: int, min_user_track_plays: int) -> List[Dict[str, object]]:
+def fetch_interactions(
+    max_users: int,
+    min_user_track_plays: int,
+    *,
+    include_demo_feedback: bool,
+    demo_feedback_boost: float,
+) -> List[Dict[str, object]]:
     conn = connect_postgres()
     try:
         with conn.cursor() as cur:
-            cur.execute(FETCH_INTERACTIONS_SQL, (max_users, min_user_track_plays))
+            if include_demo_feedback:
+                try:
+                    cur.execute(
+                        FETCH_INTERACTIONS_WITH_FEEDBACK_SQL,
+                        (max_users, demo_feedback_boost, min_user_track_plays),
+                    )
+                except Exception as exc:
+                    print(f"demo_feedback_integration_unavailable={exc}")
+                    conn.rollback()
+                    cur.execute(FETCH_INTERACTIONS_SQL, (max_users, min_user_track_plays))
+            else:
+                cur.execute(FETCH_INTERACTIONS_SQL, (max_users, min_user_track_plays))
             return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
@@ -298,6 +401,25 @@ def main() -> None:
     parser.add_argument("--top-k", type=int, default=100, help="Top-k recommendations per user to store.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument(
+        "--include-demo-feedback",
+        dest="include_demo_feedback",
+        action="store_true",
+        default=True,
+        help="Blend demo_interactions signals into MF training data (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-demo-feedback",
+        dest="include_demo_feedback",
+        action="store_false",
+        help="Disable demo_interactions blending and train only from listen_events.",
+    )
+    parser.add_argument(
+        "--demo-feedback-boost",
+        type=float,
+        default=4.0,
+        help="Multiplier applied to aggregated demo interaction signal before blending with plays.",
+    )
+    parser.add_argument(
         "--model-version",
         default=f"mf_ready_{dt.datetime.now(dt.UTC).strftime('%Y%m%dT%H%M%SZ')}",
         help="Model version tag stored with recommendations.",
@@ -305,14 +427,20 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Train and print metrics without DB write.")
     args = parser.parse_args()
 
-    rows = fetch_interactions(max_users=args.max_users, min_user_track_plays=args.min_user_track_plays)
+    rows = fetch_interactions(
+        max_users=args.max_users,
+        min_user_track_plays=args.min_user_track_plays,
+        include_demo_feedback=args.include_demo_feedback,
+        demo_feedback_boost=args.demo_feedback_boost,
+    )
     if not rows:
         raise ValueError("No interactions found in recommendation-ready slice.")
 
     interactions, user_ids, item_ids, track_name_by_id, artist_name_by_id, user_seen = prepare_training_data(rows)
     print(
         f"train_rows={len(interactions)} users={len(user_ids)} items={len(item_ids)} "
-        f"top_k={args.top_k} model_version={args.model_version}"
+        f"top_k={args.top_k} model_version={args.model_version} "
+        f"demo_feedback={args.include_demo_feedback} feedback_boost={args.demo_feedback_boost:.2f}"
     )
 
     user_f, item_f, user_b, item_b = train_mf(

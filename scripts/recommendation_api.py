@@ -7,17 +7,20 @@ Endpoints:
 - GET /metrics/recsource
 - GET /trending?limit=20
 - GET /recs/{user_id}?limit=20
+- GET /favorites/{user_id}?limit=20
 - GET /search/tracks?query=...&limit=10
 - GET /vibe?vibe=...&limit=10
 - POST /feedback/vibe
+- POST /feedback/interaction
 """
 
 from __future__ import annotations
 
 import difflib
+import json
 import os
 import re
-from typing import Any, Dict, List, Mapping
+from typing import Any, Dict, List, Mapping, Sequence
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -34,6 +37,12 @@ READABLE_SCAN_MULTIPLIER = int(os.environ.get("READABLE_SCAN_MULTIPLIER", "80"))
 USE_HYBRID_RECS = os.environ.get("USE_HYBRID_RECS", "true").strip().lower() in {"1", "true", "yes", "on"}
 USE_ML_RECS = os.environ.get("USE_ML_RECS", "true").strip().lower() in {"1", "true", "yes", "on"}
 USE_DENSE_RECS = os.environ.get("USE_DENSE_RECS", "false").strip().lower() in {"1", "true", "yes", "on"}
+ENABLE_DEMO_INTERACTION_LOGGING = os.environ.get("ENABLE_DEMO_INTERACTION_LOGGING", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 MODEL_METRICS_SQL = """
@@ -471,6 +480,24 @@ ON CONFLICT (user_id, track_id) DO UPDATE SET
     updated_at = NOW()
 """
 
+DEMO_INTERACTION_INSERT_SQL = """
+INSERT INTO music.demo_interactions (
+    user_id,
+    track_id,
+    action,
+    source_endpoint,
+    model_mode,
+    model_version,
+    recommendation_rank,
+    context_vibe,
+    session_id,
+    signal_strength,
+    metadata,
+    event_ts
+)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, NOW())
+"""
+
 TRACK_FEEDBACK_CONSENSUS_SQL = """
 WITH votes AS (
     SELECT
@@ -538,6 +565,43 @@ ON CONFLICT (track_id) DO UPDATE SET
 """
 
 DELETE_OVERRIDE_SQL = "DELETE FROM music.track_vibe_overrides WHERE track_id = %s"
+
+INTERACTION_ACTION_ALIASES = {
+    "thumbs_up": "like",
+    "thumbsup": "like",
+    "liked": "like",
+    "thumbs_down": "dislike",
+    "thumbsdown": "dislike",
+    "played": "play",
+    "listen": "play",
+    "favorited": "favorite",
+    "favourite": "favorite",
+    "added_to_playlist": "add_to_playlist",
+}
+
+ALLOWED_INTERACTION_ACTIONS = {
+    "impression",
+    "play",
+    "like",
+    "dislike",
+    "skip",
+    "favorite",
+    "add_to_playlist",
+    "query",
+    "search",
+    "session_start",
+    "session_end",
+}
+
+TRACK_REQUIRED_ACTIONS = {
+    "impression",
+    "play",
+    "like",
+    "dislike",
+    "skip",
+    "favorite",
+    "add_to_playlist",
+}
 
 VIBE_CATALOG_FALLBACK_SQL = """
 WITH pop AS (
@@ -793,11 +857,137 @@ class VibeFeedbackRequest(BaseModel):
     predicted_vibe: str | None = Field(default=None, max_length=64)
 
 
+class InteractionFeedbackRequest(BaseModel):
+    user_id: str = Field(min_length=1, max_length=128)
+    action: str = Field(min_length=1, max_length=64)
+    track_id: str | None = Field(default=None, max_length=256)
+    source_endpoint: str | None = Field(default=None, max_length=64)
+    model_mode: str | None = Field(default=None, max_length=128)
+    model_version: str | None = Field(default=None, max_length=128)
+    recommendation_rank: int | None = Field(default=None, ge=1, le=10000)
+    context_vibe: str | None = Field(default=None, max_length=64)
+    session_id: str | None = Field(default=None, max_length=128)
+    signal_strength: float | None = Field(default=None, ge=0.0, le=100.0)
+    metadata: Dict[str, Any] | None = None
+
+
 def normalize_vibe(v: str | None) -> str | None:
     if v is None:
         return None
     cleaned = v.strip().lower()
     return cleaned or None
+
+
+def normalize_interaction_action(action: str | None) -> str | None:
+    if action is None:
+        return None
+    cleaned = action.strip().lower().replace("-", "_").replace(" ", "_")
+    if not cleaned:
+        return None
+    return INTERACTION_ACTION_ALIASES.get(cleaned, cleaned)
+
+
+def default_signal_strength(action: str) -> float:
+    mapping = {
+        "impression": 0.05,
+        "query": 0.05,
+        "search": 0.05,
+        "skip": 0.20,
+        "play": 1.00,
+        "like": 2.00,
+        "favorite": 2.50,
+        "add_to_playlist": 3.00,
+        "dislike": -1.50,
+    }
+    return mapping.get(action, 1.00)
+
+
+def _safe_text(value: Any, max_len: int) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len]
+    return cleaned
+
+
+def write_demo_interactions(
+    rows: Sequence[tuple[Any, ...]],
+    *,
+    fail_on_error: bool,
+) -> int:
+    if not ENABLE_DEMO_INTERACTION_LOGGING or not rows:
+        return 0
+
+    conn_kwargs = build_conn_kwargs()
+    if "conninfo" in conn_kwargs:
+        conn = connect(conn_kwargs["conninfo"], row_factory=dict_row)
+    else:
+        conn = connect(row_factory=dict_row, **conn_kwargs)
+    try:
+        with conn.cursor() as cur:
+            cur.executemany(DEMO_INTERACTION_INSERT_SQL, rows)
+        conn.commit()
+        return len(rows)
+    except Exception:
+        conn.rollback()
+        if fail_on_error:
+            raise
+        return 0
+    finally:
+        conn.close()
+
+
+def log_impression_rows(
+    *,
+    user_id: str,
+    source_endpoint: str,
+    response_mode: str,
+    items: Sequence[Dict[str, Any]],
+    context_vibe: str | None = None,
+    session_id: str | None = None,
+) -> None:
+    if not ENABLE_DEMO_INTERACTION_LOGGING:
+        return
+    if not user_id or not items:
+        return
+
+    rows: List[tuple[Any, ...]] = []
+    for item in items:
+        track_id = _safe_text(item.get("track_id"), 256)
+        if not track_id:
+            continue
+        rec_rank = item.get("recommendation_rank") or item.get("favorite_rank") or item.get("global_rank_7d")
+        try:
+            rank = int(rec_rank) if rec_rank is not None else None
+        except Exception:
+            rank = None
+        metadata_obj = {
+            "track_name": _safe_text(item.get("track_name"), 512),
+            "artist_name": _safe_text(item.get("artist_name"), 512),
+            "source": "api_auto_impression",
+        }
+        metadata_json = json.dumps(metadata_obj, ensure_ascii=False)
+        rows.append(
+            (
+                user_id,
+                track_id,
+                "impression",
+                source_endpoint,
+                response_mode or None,
+                None,
+                rank,
+                context_vibe,
+                session_id,
+                default_signal_strength("impression"),
+                metadata_json,
+            )
+        )
+
+    if rows:
+        write_demo_interactions(rows, fail_on_error=False)
 
 
 def maybe_apply_feedback_override(track_id: str) -> Dict[str, Any]:
@@ -928,8 +1118,15 @@ def get_recsource_metrics() -> Dict[str, Any]:
 
 
 @app.get("/trending")
-def get_trending(limit: int = Query(default=20, ge=1, le=200)) -> Dict[str, Any]:
+def get_trending(
+    limit: int = Query(default=20, ge=1, le=200),
+    user_id: str | None = Query(default=None, max_length=128),
+    session_id: str | None = Query(default=None, max_length=128),
+) -> Dict[str, Any]:
     limit_scan = scan_limit(limit)
+    resolved_user_id: str | None = None
+    if user_id:
+        resolved_user_id, _display_name = resolve_user_reference(user_id)
     try:
         rows = fetch_rows(TRENDING_SQL, (limit_scan,))
     except Exception as exc:
@@ -956,6 +1153,14 @@ def get_trending(limit: int = Query(default=20, ge=1, le=200)) -> Dict[str, Any]
         resp["message"] = message
     if not rows:
         resp["message"] = "No human-readable tracks available in current result slice."
+    if resolved_user_id:
+        log_impression_rows(
+            user_id=resolved_user_id,
+            source_endpoint="/trending",
+            response_mode=mode,
+            items=rows,
+            session_id=session_id,
+        )
     return resp
 
 
@@ -981,10 +1186,18 @@ def search_tracks(query: str = Query(..., min_length=1), limit: int = Query(defa
 
 
 @app.get("/vibe")
-def get_vibe_tracks(vibe: str = Query(..., min_length=1), limit: int = Query(default=10, ge=1, le=100)) -> Dict[str, Any]:
+def get_vibe_tracks(
+    vibe: str = Query(..., min_length=1),
+    limit: int = Query(default=10, ge=1, le=100),
+    user_id: str | None = Query(default=None, max_length=128),
+    session_id: str | None = Query(default=None, max_length=128),
+) -> Dict[str, Any]:
     cleaned = vibe.strip()
     if not cleaned:
         raise HTTPException(status_code=400, detail="vibe is required.")
+    resolved_user_id: str | None = None
+    if user_id:
+        resolved_user_id, _display_name = resolve_user_reference(user_id)
     labels = vibe_labels(cleaned)
     keywords = vibe_keywords(cleaned)
     rows: List[Dict[str, Any]] = []
@@ -999,6 +1212,15 @@ def get_vibe_tracks(vibe: str = Query(..., min_length=1), limit: int = Query(def
         rows = []
     readable = readable_only(rows, limit)
     if readable:
+        if resolved_user_id:
+            log_impression_rows(
+                user_id=resolved_user_id,
+                source_endpoint="/vibe",
+                response_mode="vibe_match_features",
+                items=readable,
+                context_vibe=cleaned,
+                session_id=session_id,
+            )
         return {
             "mode": "vibe_match_features",
             "vibe": cleaned,
@@ -1015,6 +1237,15 @@ def get_vibe_tracks(vibe: str = Query(..., min_length=1), limit: int = Query(def
         raise HTTPException(status_code=500, detail=f"vibe catalog fallback failed: {exc}")
     fallback = readable_only(fallback, limit)
     if fallback:
+        if resolved_user_id:
+            log_impression_rows(
+                user_id=resolved_user_id,
+                source_endpoint="/vibe",
+                response_mode="vibe_match_catalog",
+                items=fallback,
+                context_vibe=cleaned,
+                session_id=session_id,
+            )
         return {
             "mode": "vibe_match_catalog",
             "vibe": cleaned,
@@ -1030,6 +1261,15 @@ def get_vibe_tracks(vibe: str = Query(..., min_length=1), limit: int = Query(def
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"vibe named keyword fallback failed: {exc}")
     if vibe_named:
+        if resolved_user_id:
+            log_impression_rows(
+                user_id=resolved_user_id,
+                source_endpoint="/vibe",
+                response_mode="vibe_fallback_named_keyword",
+                items=vibe_named,
+                context_vibe=cleaned,
+                session_id=session_id,
+            )
         return {
             "mode": "vibe_fallback_named_keyword",
             "vibe": cleaned,
@@ -1061,6 +1301,15 @@ def get_vibe_tracks(vibe: str = Query(..., min_length=1), limit: int = Query(def
             "items": [],
             "message": f"I couldn't find enough readable '{cleaned}' tracks yet. Try another vibe.",
         }
+    if resolved_user_id:
+        log_impression_rows(
+            user_id=resolved_user_id,
+            source_endpoint="/vibe",
+            response_mode="vibe_fallback_named_trending",
+            items=trending,
+            context_vibe=cleaned,
+            session_id=session_id,
+        )
     return {
         "mode": "vibe_fallback_named_trending",
         "vibe": cleaned,
@@ -1121,11 +1370,84 @@ def submit_vibe_feedback(payload: VibeFeedbackRequest) -> Dict[str, Any]:
     }
 
 
+@app.post("/feedback/interaction")
+def submit_interaction_feedback(payload: InteractionFeedbackRequest) -> Dict[str, Any]:
+    requested_user_ref = payload.user_id.strip()
+    resolved_user_id, display_name = resolve_user_reference(requested_user_ref)
+    action = normalize_interaction_action(payload.action)
+    if action is None:
+        raise HTTPException(status_code=400, detail="action is required.")
+    if action not in ALLOWED_INTERACTION_ACTIONS:
+        allowed = ", ".join(sorted(ALLOWED_INTERACTION_ACTIONS))
+        raise HTTPException(status_code=400, detail=f"unsupported action '{action}'. Allowed: {allowed}")
+
+    track_id = _safe_text(payload.track_id, 256)
+    if action in TRACK_REQUIRED_ACTIONS and not track_id:
+        raise HTTPException(status_code=400, detail=f"track_id is required for action '{action}'.")
+
+    source_endpoint = _safe_text(payload.source_endpoint, 64) or "/feedback/interaction"
+    model_mode = _safe_text(payload.model_mode, 128)
+    model_version = _safe_text(payload.model_version, 128)
+    context_vibe = normalize_vibe(payload.context_vibe)
+    session_id = _safe_text(payload.session_id, 128)
+    signal_strength = float(payload.signal_strength) if payload.signal_strength is not None else default_signal_strength(action)
+    recommendation_rank = payload.recommendation_rank
+
+    metadata_obj: Dict[str, Any] = dict(payload.metadata or {})
+    metadata_obj["source"] = "api_feedback"
+    if requested_user_ref != resolved_user_id:
+        metadata_obj["requested_user_ref"] = requested_user_ref
+    metadata_json = json.dumps(metadata_obj, ensure_ascii=False)
+
+    row = (
+        resolved_user_id,
+        track_id,
+        action,
+        source_endpoint,
+        model_mode,
+        model_version,
+        recommendation_rank,
+        context_vibe,
+        session_id,
+        signal_strength,
+        metadata_json,
+    )
+
+    try:
+        write_demo_interactions([row], fail_on_error=True)
+    except Exception as exc:
+        msg = str(exc)
+        if "demo_interactions" in msg and "does not exist" in msg:
+            raise HTTPException(
+                status_code=500,
+                detail="interaction feedback table missing: apply sql/postgres_schema.sql first.",
+            )
+        raise HTTPException(status_code=500, detail=f"interaction feedback write failed: {exc}")
+
+    response: Dict[str, Any] = {
+        "status": "accepted",
+        "interaction": {
+            "user_id": resolved_user_id,
+            "track_id": track_id,
+            "action": action,
+            "source_endpoint": source_endpoint,
+            "context_vibe": context_vibe,
+            "recommendation_rank": recommendation_rank,
+            "signal_strength": signal_strength,
+            "session_id": session_id,
+        },
+    }
+    if display_name:
+        response["user_display_name"] = display_name
+    return response
+
+
 @app.get("/favorites/{user_id}")
 def get_user_favorites(
     user_id: str,
     limit: int = Query(default=20, ge=1, le=200),
     fallback_to_recs: bool = Query(default=True),
+    session_id: str | None = Query(default=None, max_length=128),
 ) -> Dict[str, Any]:
     requested_user_ref = user_id.strip()
     looks_like_display_name = " " in requested_user_ref
@@ -1152,6 +1474,13 @@ def get_user_favorites(
             resp["user_reference_note"] = (
                 "Display name was not found in music.user_profiles; interpreted input as raw user_id."
             )
+        log_impression_rows(
+            user_id=resolved_user_id,
+            source_endpoint="/favorites",
+            response_mode="user_favorites",
+            items=favorites,
+            session_id=session_id,
+        )
         return resp
 
     if not fallback_to_recs:
@@ -1170,7 +1499,12 @@ def get_user_favorites(
             )
         return resp
 
-    fallback = get_recs(user_id=resolved_user_id, limit=limit, fallback_to_trending=True)
+    fallback = get_recs(
+        user_id=resolved_user_id,
+        limit=limit,
+        fallback_to_trending=True,
+        session_id=session_id,
+    )
     if isinstance(fallback, dict):
         fallback_mode = str(fallback.get("mode") or "")
         if fallback_mode.startswith("personalized"):
@@ -1189,6 +1523,7 @@ def get_recs(
     user_id: str,
     limit: int = Query(default=20, ge=1, le=200),
     fallback_to_trending: bool = Query(default=True),
+    session_id: str | None = Query(default=None, max_length=128),
 ) -> Dict[str, Any]:
     requested_user_ref = user_id.strip()
     looks_like_display_name = " " in requested_user_ref
@@ -1246,6 +1581,13 @@ def get_recs(
             resp["user_reference_note"] = (
                 "Display name was not found in music.user_profiles; interpreted input as raw user_id."
             )
+        log_impression_rows(
+            user_id=resolved_user_id,
+            source_endpoint="/recs",
+            response_mode=mode,
+            items=recs,
+            session_id=session_id,
+        )
         return resp
 
     if not fallback_to_trending:
@@ -1294,6 +1636,13 @@ def get_recs(
         )
     if not fallback:
         resp["message"] = "No human-readable recommendations available for this user in current dataset slice."
+    log_impression_rows(
+        user_id=resolved_user_id,
+        source_endpoint="/recs",
+        response_mode=mode,
+        items=fallback,
+        session_id=session_id,
+    )
     return resp
 
 
