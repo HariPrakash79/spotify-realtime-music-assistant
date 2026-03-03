@@ -54,6 +54,13 @@ def get_recs(user_id: str, limit: int = 20, fallback_to_trending: bool = True) -
     )
 
 
+def get_user_favorites(user_id: str, limit: int = 20, fallback_to_recs: bool = True) -> Dict[str, Any]:
+    return _request(
+        f"/favorites/{user_id}",
+        params={"limit": limit, "fallback_to_recs": str(fallback_to_recs).lower()},
+    )
+
+
 def search_tracks(query: str, limit: int = 10) -> Dict[str, Any]:
     return _request("/search/tracks", params={"query": query, "limit": limit})
 
@@ -82,7 +89,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Query the recommendation API.")
     parser.add_argument(
         "--query",
-        choices=["metrics", "trending", "recs", "search", "vibe", "feedback"],
+        choices=["metrics", "trending", "recs", "favorites", "search", "vibe", "feedback"],
         required=True,
         help="Which API endpoint to call.",
     )
@@ -110,6 +117,14 @@ def main() -> None:
             user_id=args.user_id,
             limit=args.limit,
             fallback_to_trending=args.fallback_to_trending,
+        )
+    elif args.query == "favorites":
+        if not args.user_id:
+            raise ValueError("--user-id is required when --query favorites is used.")
+        data = get_user_favorites(
+            user_id=args.user_id,
+            limit=args.limit,
+            fallback_to_recs=True,
         )
     elif args.query == "search":
         if not args.text:

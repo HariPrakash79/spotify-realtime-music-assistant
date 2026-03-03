@@ -14,7 +14,9 @@ Endpoints:
 
 from __future__ import annotations
 
+import difflib
 import os
+import re
 from typing import Any, Dict, List, Mapping
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -241,6 +243,36 @@ WHERE user_id = %s
 ORDER BY recommendation_rank
 """
 
+USER_FAVORITES_SQL = """
+WITH ranked AS (
+    SELECT
+        le.user_id,
+        COALESCE(NULLIF(le.track_id, ''), COALESCE(NULLIF(le.track_name, ''), '__unknown_track__')) AS track_id,
+        COALESCE(NULLIF(le.track_name, ''), COALESCE(NULLIF(le.track_id, ''), '__unknown_track__')) AS track_name,
+        MIN(NULLIF(le.artist_id, '')) AS artist_id,
+        COALESCE(MAX(NULLIF(le.artist_name, '')), '__unknown_artist__') AS artist_name,
+        COUNT(*)::BIGINT AS plays,
+        MAX(le.event_ts) AS last_played_at
+    FROM music.listen_events le
+    WHERE le.user_id = %s
+    GROUP BY
+        le.user_id,
+        COALESCE(NULLIF(le.track_id, ''), COALESCE(NULLIF(le.track_name, ''), '__unknown_track__')),
+        COALESCE(NULLIF(le.track_name, ''), COALESCE(NULLIF(le.track_id, ''), '__unknown_track__'))
+)
+SELECT
+    user_id,
+    ROW_NUMBER() OVER (ORDER BY plays DESC, last_played_at DESC, track_name, artist_name) AS favorite_rank,
+    track_id,
+    track_name,
+    artist_id,
+    artist_name,
+    plays
+FROM ranked
+ORDER BY favorite_rank
+LIMIT %s
+"""
+
 USER_EXISTS_SQL = """
 SELECT 1
 FROM music.v_model_users_1000_ready
@@ -265,6 +297,17 @@ FROM music.user_profiles
 WHERE lower(display_name) LIKE lower(%s)
 ORDER BY display_name
 LIMIT 2
+"""
+
+USER_FROM_DISPLAY_CANDIDATES_SQL = """
+SELECT
+    up.user_id,
+    up.display_name
+FROM music.user_profiles up
+JOIN music.v_model_users_1000_ready mu
+  ON mu.user_id = up.user_id
+WHERE COALESCE(up.display_name, '') <> ''
+ORDER BY up.display_name
 """
 
 DISPLAY_FROM_USER_SQL = """
@@ -618,6 +661,67 @@ def fetch_one(sql: str, params: tuple[Any, ...] = ()) -> Dict[str, Any] | None:
     return rows[0] if rows else None
 
 
+def _normalize_name_key(value: str) -> str:
+    cleaned = clean_text(value)
+    if cleaned is None:
+        return ""
+    lowered = cleaned.lower()
+    lowered = re.sub(r"[^a-z0-9 ]+", " ", lowered)
+    lowered = re.sub(r"\s+", " ", lowered).strip()
+    return lowered
+
+
+def _fuzzy_match_user_display_name(ref: str) -> tuple[str, str] | None:
+    # Fuzzy matching is only for human name-like inputs.
+    if len(ref) < 4 or not any(ch.isalpha() for ch in ref):
+        return None
+
+    query_norm = _normalize_name_key(ref)
+    if not query_norm:
+        return None
+
+    try:
+        rows = fetch_rows(USER_FROM_DISPLAY_CANDIDATES_SQL)
+    except Exception:
+        return None
+    if not rows:
+        return None
+
+    query_tokens = set(query_norm.split())
+    scored: List[tuple[float, str, str]] = []
+    for row in rows:
+        user_id = str(row.get("user_id") or "").strip()
+        display_name = str(row.get("display_name") or "").strip()
+        if not user_id or not display_name:
+            continue
+
+        display_norm = _normalize_name_key(display_name)
+        if not display_norm:
+            continue
+
+        full_ratio = difflib.SequenceMatcher(None, query_norm, display_norm).ratio()
+        token_ratio = max(
+            (difflib.SequenceMatcher(None, query_norm, tok).ratio() for tok in display_norm.split()),
+            default=0.0,
+        )
+        overlap_bonus = 0.03 if query_tokens.intersection(display_norm.split()) else 0.0
+        score = max(full_ratio, token_ratio) + overlap_bonus
+        scored.append((score, user_id, display_name))
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best_score, best_user_id, best_display = scored[0]
+    second_score = scored[1][0] if len(scored) > 1 else 0.0
+    score_gap = best_score - second_score
+
+    # Guardrails: require strong match, or very strong best score with clear gap.
+    if best_score >= 0.84 and (score_gap >= 0.05 or best_score >= 0.92):
+        return best_user_id, best_display
+    return None
+
+
 def resolve_user_reference(user_ref: str) -> tuple[str, str | None]:
     ref = user_ref.strip()
     if not ref:
@@ -648,6 +752,10 @@ def resolve_user_reference(user_ref: str) -> tuple[str, str | None]:
                 return str(row["user_id"]), str(row["display_name"])
         except Exception:
             return ref, None
+
+        fuzzy = _fuzzy_match_user_display_name(ref)
+        if fuzzy is not None:
+            return fuzzy
 
     return ref, None
 
@@ -1011,6 +1119,69 @@ def submit_vibe_feedback(payload: VibeFeedbackRequest) -> Dict[str, Any]:
         },
         "override_update": override_result,
     }
+
+
+@app.get("/favorites/{user_id}")
+def get_user_favorites(
+    user_id: str,
+    limit: int = Query(default=20, ge=1, le=200),
+    fallback_to_recs: bool = Query(default=True),
+) -> Dict[str, Any]:
+    requested_user_ref = user_id.strip()
+    looks_like_display_name = " " in requested_user_ref
+    resolved_user_id, display_name = resolve_user_reference(user_id)
+    unresolved_display_name = looks_like_display_name and display_name is None and resolved_user_id == requested_user_ref
+    limit_scan = scan_limit(limit, multiplier=50)
+
+    try:
+        favorites = fetch_rows(USER_FAVORITES_SQL, (resolved_user_id, limit_scan))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"favorites query failed: {exc}")
+    favorites = readable_only(favorites, limit)
+    if favorites:
+        resp: Dict[str, Any] = {
+            "user_id": resolved_user_id,
+            "mode": "user_favorites",
+            "count": len(favorites),
+            "items": favorites,
+            "message": "Here are your top listened tracks.",
+        }
+        if display_name:
+            resp["user_display_name"] = display_name
+        if unresolved_display_name:
+            resp["user_reference_note"] = (
+                "Display name was not found in music.user_profiles; interpreted input as raw user_id."
+            )
+        return resp
+
+    if not fallback_to_recs:
+        resp: Dict[str, Any] = {
+            "user_id": resolved_user_id,
+            "mode": "no_favorites",
+            "count": 0,
+            "items": [],
+            "message": "No readable top-listened tracks available for this user yet.",
+        }
+        if display_name:
+            resp["user_display_name"] = display_name
+        if unresolved_display_name:
+            resp["user_reference_note"] = (
+                "Display name was not found in music.user_profiles; interpreted input as raw user_id."
+            )
+        return resp
+
+    fallback = get_recs(user_id=resolved_user_id, limit=limit, fallback_to_trending=True)
+    if isinstance(fallback, dict):
+        fallback_mode = str(fallback.get("mode") or "")
+        if fallback_mode.startswith("personalized"):
+            fallback["mode"] = "favorites_fallback_personalized"
+            fallback["message"] = "No readable favorites found; returned personalized recommendations."
+        elif fallback_mode.startswith("fallback"):
+            fallback["mode"] = "favorites_fallback_trending"
+            fallback["message"] = "No readable favorites found; returned trending tracks."
+    if display_name:
+        fallback["user_display_name"] = display_name
+    return fallback
 
 
 @app.get("/recs/{user_id}")
