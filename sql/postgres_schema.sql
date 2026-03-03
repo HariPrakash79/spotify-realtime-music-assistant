@@ -880,6 +880,50 @@ FROM music.user_recommendations_mf_ready r
 JOIN latest l
   ON l.model_version = r.model_version;
 
+-- Hybrid personalized recommendation storage (MF + popularity + artist affinity).
+CREATE TABLE IF NOT EXISTS music.user_recommendations_hybrid_ready (
+    model_version        TEXT NOT NULL,
+    user_id              TEXT NOT NULL,
+    recommendation_rank  INTEGER NOT NULL,
+    track_id             TEXT NOT NULL,
+    track_name           TEXT,
+    artist_name          TEXT,
+    mf_score             DOUBLE PRECISION,
+    pop_score            DOUBLE PRECISION,
+    artist_bonus         DOUBLE PRECISION,
+    recommendation_score DOUBLE PRECISION NOT NULL,
+    generated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (model_version, user_id, recommendation_rank)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_recs_hybrid_ready_user
+    ON music.user_recommendations_hybrid_ready (user_id, generated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_user_recs_hybrid_ready_model
+    ON music.user_recommendations_hybrid_ready (model_version, user_id, recommendation_rank);
+
+CREATE OR REPLACE VIEW music.v_user_recommendations_hybrid_ready AS
+WITH latest AS (
+    SELECT model_version
+    FROM music.user_recommendations_hybrid_ready
+    ORDER BY generated_at DESC
+    LIMIT 1
+)
+SELECT
+    r.user_id,
+    r.recommendation_rank,
+    r.track_id,
+    r.track_name,
+    NULL::TEXT AS artist_id,
+    r.artist_name,
+    r.mf_score,
+    r.pop_score,
+    r.artist_bonus,
+    r.recommendation_score
+FROM music.user_recommendations_hybrid_ready r
+JOIN latest l
+  ON l.model_version = r.model_version;
+
 -- Human-friendly user names for demos/chatbots/UI while preserving stable user_id keys.
 CREATE TABLE IF NOT EXISTS music.user_profiles (
     user_id       TEXT PRIMARY KEY,

@@ -4,6 +4,7 @@ Lightweight serving API for music recommendations.
 
 Endpoints:
 - GET /metrics/model
+- GET /metrics/recsource
 - GET /trending?limit=20
 - GET /recs/{user_id}?limit=20
 - GET /search/tracks?query=...&limit=10
@@ -26,7 +27,9 @@ CONSENSUS_MIN_TOP_SHARE = float(os.environ.get("VIBE_FEEDBACK_MIN_TOP_SHARE", "0
 CONSENSUS_MIN_MARGIN = float(os.environ.get("VIBE_FEEDBACK_MIN_MARGIN", "0.15"))
 READABLE_SCAN_MIN = int(os.environ.get("READABLE_SCAN_MIN", "500"))
 READABLE_SCAN_MULTIPLIER = int(os.environ.get("READABLE_SCAN_MULTIPLIER", "80"))
+USE_HYBRID_RECS = os.environ.get("USE_HYBRID_RECS", "true").strip().lower() in {"1", "true", "yes", "on"}
 USE_ML_RECS = os.environ.get("USE_ML_RECS", "true").strip().lower() in {"1", "true", "yes", "on"}
+USE_DENSE_RECS = os.environ.get("USE_DENSE_RECS", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 MODEL_METRICS_SQL = """
@@ -221,6 +224,21 @@ WHERE user_id = %s
 ORDER BY recommendation_rank
 """
 
+USER_RECS_HYBRID_SQL = """
+SELECT
+    user_id,
+    recommendation_rank,
+    track_id,
+    track_name,
+    artist_id,
+    artist_name,
+    recommendation_score
+FROM music.v_user_recommendations_hybrid_ready
+WHERE user_id = %s
+  AND recommendation_rank <= %s
+ORDER BY recommendation_rank
+"""
+
 USER_EXISTS_SQL = """
 SELECT 1
 FROM music.v_model_users_1000_ready
@@ -243,6 +261,51 @@ SELECT
 FROM music.user_profiles
 WHERE user_id = %s
 LIMIT 1
+"""
+
+REC_SOURCE_LATEST_HYBRID_SQL = """
+SELECT
+    model_version,
+    generated_at
+FROM music.user_recommendations_hybrid_ready
+ORDER BY generated_at DESC
+LIMIT 1
+"""
+
+REC_SOURCE_LATEST_MF_SQL = """
+SELECT
+    model_version,
+    generated_at
+FROM music.user_recommendations_mf_ready
+ORDER BY generated_at DESC
+LIMIT 1
+"""
+
+REC_SOURCE_COUNTS_HYBRID_SQL = """
+SELECT
+    COUNT(*)::BIGINT AS rows,
+    COUNT(DISTINCT user_id)::BIGINT AS users
+FROM music.v_user_recommendations_hybrid_ready
+"""
+
+REC_SOURCE_COUNTS_MF_SQL = """
+SELECT
+    COUNT(*)::BIGINT AS rows,
+    COUNT(DISTINCT user_id)::BIGINT AS users
+FROM music.v_user_recommendations_mf_ready
+"""
+
+REC_SOURCE_COUNTS_DENSE_SQL = """
+SELECT
+    COUNT(*)::BIGINT AS rows,
+    COUNT(DISTINCT user_id)::BIGINT AS users
+FROM music.v_user_recommendations_30d_dense_1000_ready
+"""
+
+REC_SOURCE_COUNTS_TRENDING_SQL = """
+SELECT
+    COUNT(*)::BIGINT AS rows
+FROM music.v_global_trending_tracks_7d_ready
 """
 
 SEARCH_TRACKS_SQL = """
@@ -669,6 +732,45 @@ def get_model_metrics() -> Dict[str, Any]:
     return rows[0]
 
 
+@app.get("/metrics/recsource")
+def get_recsource_metrics() -> Dict[str, Any]:
+    response: Dict[str, Any] = {
+        "serving_priority": ["hybrid", "mf", "trending"],
+        "feature_flags": {
+            "USE_HYBRID_RECS": USE_HYBRID_RECS,
+            "USE_ML_RECS": USE_ML_RECS,
+            "USE_DENSE_RECS": USE_DENSE_RECS,
+        },
+        "sources": {},
+    }
+
+    for name, latest_sql, count_sql in [
+        ("hybrid", REC_SOURCE_LATEST_HYBRID_SQL, REC_SOURCE_COUNTS_HYBRID_SQL),
+        ("mf", REC_SOURCE_LATEST_MF_SQL, REC_SOURCE_COUNTS_MF_SQL),
+        ("dense", None, REC_SOURCE_COUNTS_DENSE_SQL),
+        ("trending", None, REC_SOURCE_COUNTS_TRENDING_SQL),
+    ]:
+        try:
+            latest = fetch_one(latest_sql) if latest_sql else None
+            counts = fetch_one(count_sql) or {}
+            rows = int(counts.get("rows") or 0)
+            users = int(counts.get("users") or 0)
+            response["sources"][name] = {
+                "available": rows > 0,
+                "rows": rows,
+                "users": users if name != "trending" else None,
+                "model_version": (latest.get("model_version") if latest else None),
+                "generated_at": (latest.get("generated_at") if latest else None),
+            }
+        except Exception as exc:
+            response["sources"][name] = {
+                "available": False,
+                "error": str(exc),
+            }
+
+    return response
+
+
 @app.get("/trending")
 def get_trending(limit: int = Query(default=20, ge=1, le=200)) -> Dict[str, Any]:
     limit_scan = scan_limit(limit)
@@ -875,25 +977,36 @@ def get_recs(
     unresolved_display_name = looks_like_display_name and display_name is None and resolved_user_id == requested_user_ref
     limit_scan = scan_limit(limit, multiplier=50)
     recs: List[Dict[str, Any]] = []
-    mode = "personalized_dense_1000"
+    mode = "personalized_hybrid_ready"
     source_errors: List[str] = []
+    attempted_sources: List[str] = []
 
-    if USE_ML_RECS:
+    if USE_HYBRID_RECS:
+        attempted_sources.append("hybrid")
+        try:
+            recs = fetch_rows(USER_RECS_HYBRID_SQL, (resolved_user_id, limit_scan))
+            mode = "personalized_hybrid_ready"
+        except Exception as exc:
+            source_errors.append(f"hybrid:{exc}")
+            recs = []
+
+    if not recs and USE_ML_RECS:
+        attempted_sources.append("mf")
         try:
             recs = fetch_rows(USER_RECS_MF_SQL, (resolved_user_id, limit_scan))
             mode = "personalized_mf_ready"
         except Exception as exc:
-            # Keep serving from rule-based model if ML table/view is not ready yet.
             source_errors.append(f"mf:{exc}")
             recs = []
 
-    if not recs:
+    if not recs and USE_DENSE_RECS:
+        attempted_sources.append("dense")
         try:
             recs = fetch_rows(USER_RECS_DENSE_SQL, (resolved_user_id, limit_scan))
             mode = "personalized_dense_1000"
         except Exception as exc:
             source_errors.append(f"dense:{exc}")
-            raise HTTPException(status_code=500, detail=f"recommendation query failed: {' | '.join(source_errors)}")
+            recs = []
 
     recs = readable_only(recs, limit)
 
@@ -907,7 +1020,9 @@ def get_recs(
         if display_name:
             resp["user_display_name"] = display_name
         if source_errors:
-            resp["note"] = "ML source unavailable in this run; served fallback recommendation source."
+            resp["note"] = "Higher-priority source unavailable in this run; served next recommendation source."
+        if attempted_sources:
+            resp["sources_attempted"] = attempted_sources
         if unresolved_display_name:
             resp["user_reference_note"] = (
                 "Display name was not found in music.user_profiles; interpreted input as raw user_id."
@@ -915,12 +1030,17 @@ def get_recs(
         return resp
 
     if not fallback_to_trending:
-        return {
+        resp: Dict[str, Any] = {
             "user_id": user_id,
             "mode": "no_results",
             "count": 0,
             "items": [],
         }
+        if attempted_sources:
+            resp["sources_attempted"] = attempted_sources
+        if source_errors:
+            resp["source_errors"] = source_errors
+        return resp
 
     try:
         fallback = fetch_rows(TRENDING_SQL, (limit_scan,))
@@ -928,7 +1048,7 @@ def get_recs(
         raise HTTPException(status_code=500, detail=f"fallback query failed: {exc}")
     fallback = readable_only(fallback, limit)
     mode = "fallback_trending"
-    message = "User not in dense personalization slice; returned global trending tracks."
+    message = "No personalized readable recommendations available; returned global trending tracks."
     if not fallback:
         try:
             fallback = fetch_rows(NAMED_TRENDING_SQL, (limit,))
@@ -945,6 +1065,8 @@ def get_recs(
         "count": len(fallback),
         "items": fallback,
     }
+    if attempted_sources:
+        resp["sources_attempted"] = attempted_sources
     if display_name:
         resp["user_display_name"] = display_name
     if unresolved_display_name:
