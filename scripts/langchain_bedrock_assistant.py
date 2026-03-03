@@ -22,7 +22,7 @@ import argparse
 import json
 import os
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 
 from langchain_aws import ChatBedrockConverse
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
@@ -47,6 +47,7 @@ Rules:
 
 
 VIBE_OPTIONS = ["chill", "focus", "happy", "sad", "party", "energetic", "romantic"]
+FALLBACK_CANCEL_TOKENS = {"cancel", "skip", "never mind", "nevermind", "stop"}
 
 
 def _to_json(data: Any) -> str:
@@ -88,6 +89,54 @@ def _extract_user_id(text: str) -> str | None:
     return None
 
 
+def _clean_candidate_user_ref(raw: str) -> str | None:
+    candidate = raw.strip().strip("\"'.,!?;:")
+    candidate = re.sub(r"\b(?:please|pls)\b$", "", candidate, flags=re.IGNORECASE).strip()
+    if not candidate:
+        return None
+
+    lower = candidate.lower()
+    blocked = {
+        "me",
+        "my",
+        "us",
+        "everyone",
+        "all",
+        "song",
+        "songs",
+        "track",
+        "tracks",
+        "music",
+        "playlist",
+    }
+    if lower in blocked:
+        return None
+    if len(candidate) > 80:
+        return None
+    if any(v in lower for v in VIBE_OPTIONS) and len(lower.split()) <= 2:
+        return None
+    return candidate
+
+
+def _extract_user_reference(text: str) -> str | None:
+    user_id = _extract_user_id(text)
+    if user_id:
+        return user_id
+
+    patterns = [
+        r"\bfor\s+([A-Za-z][A-Za-z .'\-]{1,80})$",
+        r"\b(?:recommend|recs?|suggest|give)\b.*?\bfor\s+([A-Za-z][A-Za-z .'\-]{1,80})$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        candidate = _clean_candidate_user_ref(match.group(1))
+        if candidate:
+            return candidate
+    return None
+
+
 def _extract_vibe(text: str) -> str | None:
     lower = text.lower()
     for vibe in VIBE_OPTIONS:
@@ -102,17 +151,21 @@ def _extract_vibe(text: str) -> str | None:
 
 def _route_tool(text: str) -> tuple[str, Dict[str, Any]] | None:
     lower = text.lower()
-    user_id = _extract_user_id(text)
+    user_ref = _extract_user_reference(text)
     vibe = _extract_vibe(text)
 
-    if user_id and any(t in lower for t in ["recommend", "recs", "suggest"]):
-        return ("get_recs", {"user_id": user_id, "limit": 20, "fallback_to_trending": True})
+    if user_ref and any(t in lower for t in ["recommend", "recs", "suggest"]):
+        return ("get_recs", {"user_id": user_ref, "limit": 20, "fallback_to_trending": True})
 
     if any(t in lower for t in ["trending", "popular", "hot", "top songs", "top tracks"]):
         return ("get_trending", {"limit": 10})
 
     if vibe is not None:
         return ("get_vibe", {"vibe": vibe, "limit": 10})
+
+    # Route "give songs for <name>" style prompts to personalized recommendations.
+    if user_ref and any(t in lower for t in ["song", "songs", "track", "tracks", "music", "give"]):
+        return ("get_recs", {"user_id": user_ref, "limit": 20, "fallback_to_trending": True})
 
     m = re.search(r"(?:find|search|song|track)\s+(.+)$", text, flags=re.IGNORECASE)
     if m:
@@ -121,6 +174,51 @@ def _route_tool(text: str) -> tuple[str, Dict[str, Any]] | None:
             return ("search_tracks", {"query": query, "limit": 5})
 
     return None
+
+
+def _extract_requested_count(text: str, default: int = 10) -> int:
+    lower = text.lower()
+    m = re.search(r"\b(\d{1,3})\b", lower)
+    if m and any(tok in lower for tok in ["song", "songs", "track", "tracks", "more", "recommend", "give"]):
+        n = int(m.group(1))
+        return max(1, min(n, 100))
+    if "few" in lower:
+        return 5
+    return default
+
+
+def _is_more_request(text: str) -> bool:
+    lower = text.lower()
+    return any(tok in lower for tok in [" more", "more ", "another", "next"])
+
+
+def _track_key(row: Dict[str, Any]) -> str:
+    track_id = str(row.get("track_id") or "").strip().lower()
+    if track_id:
+        return track_id
+    track = str(row.get("track_name") or "").strip().lower()
+    artist = str(row.get("artist_name") or "").strip().lower()
+    return f"{track}::{artist}"
+
+
+def _paginate_vibe_items(
+    vibe_data: Dict[str, Any],
+    seen_keys: Set[str],
+    page_size: int,
+) -> List[Dict[str, Any]]:
+    items = vibe_data.get("items")
+    if not isinstance(items, list):
+        return []
+    unseen: List[Dict[str, Any]] = []
+    for row in items:
+        key = _track_key(row)
+        if key in seen_keys:
+            continue
+        unseen.append(row)
+    page = unseen[: max(page_size, 1)]
+    for row in page:
+        seen_keys.add(_track_key(row))
+    return page
 
 
 def _invoke_tool_json(tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
@@ -173,6 +271,20 @@ def _format_grounded_response(tool_name: str, data: Dict[str, Any]) -> str:
     return json.dumps(data, default=str)
 
 
+def _is_missing_song_result(data: Dict[str, Any]) -> bool:
+    if not isinstance(data, dict):
+        return False
+    items = data.get("items")
+    if not isinstance(items, list):
+        return False
+    return len(items) == 0
+
+
+def _cancel_pending_requested(text: str) -> bool:
+    lower = text.strip().lower()
+    return any(token in lower for token in FALLBACK_CANCEL_TOKENS)
+
+
 @tool
 def get_model_metrics() -> str:
     """Get model-slice metrics (events, users, tracks, events_per_user)."""
@@ -187,7 +299,7 @@ def get_trending(limit: int = 10) -> str:
 
 @tool
 def get_recs(user_id: str, limit: int = 20, fallback_to_trending: bool = True) -> str:
-    """Get personalized recommendations for a user_id."""
+    """Get personalized recommendations for a user reference (user_id or display name)."""
     return _to_json(
         rc.get_recs(
             user_id=user_id,
@@ -296,6 +408,11 @@ def main() -> None:
     llm_with_tools = llm.bind_tools(TOOLS)
 
     messages: List[Any] = [SystemMessage(content=SYSTEM_PROMPT)]
+    pending_missing_song_query: str | None = None
+    last_vibe_label: str | None = None
+    vibe_seen_keys: Dict[str, Set[str]] = {}
+    last_rec_user_ref: str | None = None
+    rec_seen_keys: Dict[str, Set[str]] = {}
 
     print("LangChain Bedrock Music Assistant ready. Type 'exit' to quit.")
     print(f"model={args.model_id} region={args.region}")
@@ -311,12 +428,149 @@ def main() -> None:
         if not user_text:
             continue
 
+        if pending_missing_song_query is not None:
+            if _cancel_pending_requested(user_text):
+                print("\nAssistant: No problem. I cancelled that song-based fallback.")
+                pending_missing_song_query = None
+                continue
+
+            pending_vibe = _extract_vibe(user_text)
+            if pending_vibe is None:
+                print(
+                    "\nAssistant: I still need a vibe to continue. "
+                    "Try one of: chill, focus, happy, sad, party, energetic, romantic. "
+                    "Or type 'cancel'."
+                )
+                continue
+
+            try:
+                vibe_data = _invoke_tool_json("get_vibe", {"vibe": pending_vibe, "limit": 100})
+                vibe_seen_keys[pending_vibe] = set()
+                page = _paginate_vibe_items(vibe_data, vibe_seen_keys[pending_vibe], page_size=10)
+                if page:
+                    grounded = _format_items(page, limit=10)
+                else:
+                    grounded = _format_grounded_response("get_vibe", vibe_data)
+                print(
+                    "\nAssistant: I couldn't find that exact song in the current dataset. "
+                    f"Closest matches for '{pending_missing_song_query}' using vibe '{pending_vibe}':\n\n"
+                    f"{grounded}"
+                )
+                last_vibe_label = pending_vibe
+            except Exception as exc:
+                print(f"\nAssistant error: {exc}")
+            finally:
+                pending_missing_song_query = None
+            continue
+
+        if _is_more_request(user_text):
+            more_vibe = _extract_vibe(user_text) or last_vibe_label
+            if more_vibe:
+                page_size = _extract_requested_count(user_text, default=5)
+                try:
+                    vibe_data = _invoke_tool_json("get_vibe", {"vibe": more_vibe, "limit": 100})
+                    seen = vibe_seen_keys.setdefault(more_vibe, set())
+                    page = _paginate_vibe_items(vibe_data, seen, page_size=page_size)
+                    if page:
+                        print(
+                            f"\nAssistant: Here are {len(page)} more '{more_vibe}' songs:\n\n"
+                            f"{_format_items(page, limit=len(page))}"
+                        )
+                    else:
+                        msg = vibe_data.get("message") or (
+                            f"I ran out of unseen '{more_vibe}' tracks in the current catalog."
+                        )
+                        print(f"\nAssistant: {msg}")
+                    last_vibe_label = more_vibe
+                except Exception as exc:
+                    print(f"\nAssistant error: {exc}")
+                continue
+
+            # Support "5 more" after personalized recommendations.
+            more_user_ref = _extract_user_reference(user_text) or last_rec_user_ref
+            if more_user_ref:
+                page_size = _extract_requested_count(user_text, default=5)
+                try:
+                    rec_data = _invoke_tool_json(
+                        "get_recs",
+                        {
+                            "user_id": more_user_ref,
+                            "limit": 100,
+                            "fallback_to_trending": True,
+                        },
+                    )
+                    context_name = str(
+                        rec_data.get("user_display_name")
+                        or rec_data.get("user_id")
+                        or more_user_ref
+                    ).strip()
+                    context_key = context_name.lower()
+                    seen = rec_seen_keys.setdefault(context_key, set())
+                    page = _paginate_vibe_items(rec_data, seen, page_size=page_size)
+                    if page:
+                        print(
+                            f"\nAssistant: Here are {len(page)} more recommendations for {context_name}:\n\n"
+                            f"{_format_items(page, limit=len(page))}"
+                        )
+                    else:
+                        msg = rec_data.get("message") or (
+                            f"I ran out of unseen recommendations for {context_name}."
+                        )
+                        print(f"\nAssistant: {msg}")
+                    last_rec_user_ref = context_name
+                except Exception as exc:
+                    print(f"\nAssistant error: {exc}")
+                continue
+
         planned = _route_tool(user_text)
         if planned is not None:
             tool_name, tool_args = planned
             try:
+                if tool_name == "get_recs":
+                    tool_args = dict(tool_args)
+                    tool_args["limit"] = max(int(tool_args.get("limit", 20)), 100)
                 data = _invoke_tool_json(tool_name, tool_args)
-                print(f"\nAssistant: {_format_grounded_response(tool_name, data)}")
+                if tool_name == "search_tracks" and _is_missing_song_result(data):
+                    pending_missing_song_query = str(tool_args.get("query", "")).strip() or "that song"
+                    print(
+                        "\nAssistant: I couldn't find that exact song in the current dataset. "
+                        "Tell me the vibe you want (chill/focus/happy/sad/party/energetic/romantic) "
+                        "and I'll return the closest tracks."
+                    )
+                elif tool_name == "get_vibe":
+                    vibe = str(tool_args.get("vibe") or "").strip().lower()
+                    page_size = _extract_requested_count(user_text, default=10)
+                    vibe_seen_keys[vibe] = set()
+                    page = _paginate_vibe_items(data, vibe_seen_keys[vibe], page_size=page_size)
+                    if page:
+                        msg = data.get("message") or f"Here are the closest '{vibe}' tracks from your catalog."
+                        print(f"\nAssistant: {msg}\n\n{_format_items(page, limit=len(page))}")
+                    else:
+                        print(f"\nAssistant: {_format_grounded_response(tool_name, data)}")
+                    last_vibe_label = vibe or last_vibe_label
+                elif tool_name == "get_recs":
+                    page_size = _extract_requested_count(user_text, default=10)
+                    requested_user_ref = str(tool_args.get("user_id") or "").strip()
+                    context_name = str(
+                        data.get("user_display_name")
+                        or data.get("user_id")
+                        or requested_user_ref
+                    ).strip()
+                    context_key = context_name.lower()
+                    rec_seen_keys[context_key] = set()
+                    page = _paginate_vibe_items(data, rec_seen_keys[context_key], page_size=page_size)
+                    if page:
+                        mode = str(data.get("mode") or "")
+                        if mode.startswith("personalized"):
+                            intro = f"Here are {len(page)} personalized recommendations for {context_name}:"
+                        else:
+                            intro = data.get("message") or f"Here are recommendations for {context_name}:"
+                        print(f"\nAssistant: {intro}\n\n{_format_items(page, limit=len(page))}")
+                    else:
+                        print(f"\nAssistant: {_format_grounded_response(tool_name, data)}")
+                    last_rec_user_ref = context_name
+                else:
+                    print(f"\nAssistant: {_format_grounded_response(tool_name, data)}")
             except Exception as exc:
                 print(f"\nAssistant error: {exc}")
             continue

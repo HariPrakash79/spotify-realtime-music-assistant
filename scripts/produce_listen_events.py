@@ -21,6 +21,8 @@ import pandas as pd
 import pyarrow.parquet as pq
 from kafka import KafkaProducer
 
+from text_cleanup import clean_text
+
 
 def qualify_key(root_prefix: str, object_key: str) -> str:
     object_key = object_key.lstrip("/")
@@ -111,15 +113,6 @@ def to_iso_utc(value) -> Optional[str]:
         return value.isoformat()
     text = str(value).strip()
     return text or None
-
-
-def clean_text(value) -> Optional[str]:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text or text.lower() in {"nan", "none", "null"}:
-        return None
-    return text
 
 
 def make_producer(

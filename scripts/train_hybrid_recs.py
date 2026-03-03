@@ -24,6 +24,8 @@ from typing import Any, Dict, List, Mapping, Sequence, Tuple
 from psycopg import connect
 from psycopg.rows import dict_row
 
+from text_cleanup import clean_text
+
 
 FETCH_HISTORY_SQL = """
 WITH model_users AS (
@@ -144,8 +146,8 @@ def prepare_history_structures(
         user_id = str(row["user_id"])
         track_id = str(row["track_id"])
         plays = int(row["plays"])
-        track_name = str(row.get("track_name") or track_id)
-        artist_name = str(row.get("artist_name") or "__unknown_artist__")
+        track_name = clean_text(row.get("track_name"), repair_mojibake=True) or track_id
+        artist_name = clean_text(row.get("artist_name"), repair_mojibake=True) or "__unknown_artist__"
 
         user_track_counts[user_id][track_id] = plays
         global_pop[track_id] += plays
@@ -185,8 +187,8 @@ def build_hybrid_rows(
         track_id = str(row["track_id"])
         if track_id not in track_meta:
             track_meta[track_id] = {
-                "track_name": str(row.get("track_name") or track_id),
-                "artist_name": str(row.get("artist_name") or "__unknown_artist__"),
+                "track_name": clean_text(row.get("track_name"), repair_mojibake=True) or track_id,
+                "artist_name": clean_text(row.get("artist_name"), repair_mojibake=True) or "__unknown_artist__",
             }
 
     top_pop_tracks = [
@@ -226,8 +228,16 @@ def build_hybrid_rows(
             meta = track_meta.get(track_id, {})
             candidates[track_id] = {
                 "track_id": track_id,
-                "track_name": str(row.get("track_name") or meta.get("track_name") or track_id),
-                "artist_name": str(row.get("artist_name") or meta.get("artist_name") or "__unknown_artist__"),
+                "track_name": (
+                    clean_text(row.get("track_name"), repair_mojibake=True)
+                    or clean_text(meta.get("track_name"), repair_mojibake=True)
+                    or track_id
+                ),
+                "artist_name": (
+                    clean_text(row.get("artist_name"), repair_mojibake=True)
+                    or clean_text(meta.get("artist_name"), repair_mojibake=True)
+                    or "__unknown_artist__"
+                ),
                 "mf_score": float(row.get("recommendation_score", 0.0)),
             }
 
@@ -239,8 +249,8 @@ def build_hybrid_rows(
                 meta = track_meta.get(track_id, {})
                 candidates[track_id] = {
                     "track_id": track_id,
-                    "track_name": str(meta.get("track_name", track_id)),
-                    "artist_name": str(meta.get("artist_name", "__unknown_artist__")),
+                    "track_name": clean_text(meta.get("track_name"), repair_mojibake=True) or track_id,
+                    "artist_name": clean_text(meta.get("artist_name"), repair_mojibake=True) or "__unknown_artist__",
                     "mf_score": mf_min,
                 }
             if len(candidates) >= candidate_cap:

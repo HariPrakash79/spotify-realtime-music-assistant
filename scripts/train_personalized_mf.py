@@ -23,6 +23,8 @@ import numpy as np
 from psycopg import connect
 from psycopg.rows import dict_row
 
+from text_cleanup import clean_text
+
 
 FETCH_INTERACTIONS_SQL = """
 WITH model_users AS (
@@ -140,8 +142,12 @@ def prepare_training_data(
             max_log = logp
 
         per_user_seen[u].add(i)
-        track_name_by_id[str(r["track_id"])] = str(r.get("track_name") or str(r["track_id"]))
-        artist_name_by_id[str(r["track_id"])] = str(r.get("artist_name") or "__unknown_artist__")
+        track_name_by_id[str(r["track_id"])] = (
+            clean_text(r.get("track_name"), repair_mojibake=True) or str(r["track_id"])
+        )
+        artist_name_by_id[str(r["track_id"])] = (
+            clean_text(r.get("artist_name"), repair_mojibake=True) or "__unknown_artist__"
+        )
 
     if max_log <= 0.0:
         max_log = 1.0

@@ -22,6 +22,8 @@ from kafka import KafkaConsumer
 from psycopg import connect
 from psycopg.rows import dict_row
 
+from text_cleanup import clean_text
+
 INSERT_SQL = """
 INSERT INTO music.listen_events (
     source,
@@ -36,16 +38,6 @@ INSERT INTO music.listen_events (
 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (event_hash) DO NOTHING
 """
-
-
-def clean_text(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text or text.lower() in {"nan", "none", "null"}:
-        return None
-    return text
-
 
 def build_event_hash(
     source: str,

@@ -17,10 +17,12 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Mapping
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from psycopg import connect
 from psycopg.rows import dict_row
+
+from text_cleanup import clean_display_text, clean_text
 
 CONSENSUS_MIN_USERS = int(os.environ.get("VIBE_FEEDBACK_MIN_USERS", "15"))
 CONSENSUS_MIN_TOP_SHARE = float(os.environ.get("VIBE_FEEDBACK_MIN_TOP_SHARE", "0.70"))
@@ -253,6 +255,16 @@ SELECT
 FROM music.user_profiles
 WHERE lower(display_name) = lower(%s)
 LIMIT 1
+"""
+
+USER_FROM_DISPLAY_PARTIAL_SQL = """
+SELECT
+    user_id,
+    display_name
+FROM music.user_profiles
+WHERE lower(display_name) LIKE lower(%s)
+ORDER BY display_name
+LIMIT 2
 """
 
 DISPLAY_FROM_USER_SQL = """
@@ -575,6 +587,18 @@ def build_conn_kwargs() -> Mapping[str, str]:
 
 
 def fetch_rows(sql: str, params: tuple[Any, ...] = ()) -> List[Dict[str, Any]]:
+    def _clean_metadata_fields(row: Dict[str, Any]) -> Dict[str, Any]:
+        # Output guardrail: keep API metadata human-readable even if stale mojibake rows exist in DB.
+        if "track_name" in row:
+            cleaned_track = clean_display_text(row.get("track_name"), repair_mojibake=True)
+            if cleaned_track:
+                row["track_name"] = cleaned_track
+        if "artist_name" in row:
+            cleaned_artist = clean_display_text(row.get("artist_name"), repair_mojibake=True)
+            if cleaned_artist:
+                row["artist_name"] = cleaned_artist
+        return row
+
     conn_kwargs = build_conn_kwargs()
     if "conninfo" in conn_kwargs:
         conn = connect(conn_kwargs["conninfo"], row_factory=dict_row)
@@ -584,7 +608,7 @@ def fetch_rows(sql: str, params: tuple[Any, ...] = ()) -> List[Dict[str, Any]]:
     try:
         with conn.cursor() as cur:
             cur.execute(sql, params)
-            return [dict(row) for row in cur.fetchall()]
+            return [_clean_metadata_fields(dict(row)) for row in cur.fetchall()]
     finally:
         conn.close()
 
@@ -595,22 +619,37 @@ def fetch_one(sql: str, params: tuple[Any, ...] = ()) -> Dict[str, Any] | None:
 
 
 def resolve_user_reference(user_ref: str) -> tuple[str, str | None]:
-    direct = fetch_one(USER_EXISTS_SQL, (user_ref,))
+    ref = user_ref.strip()
+    if not ref:
+        return user_ref, None
+
+    direct = fetch_one(USER_EXISTS_SQL, (ref,))
     if direct:
         try:
-            display = fetch_one(DISPLAY_FROM_USER_SQL, (user_ref,))
-            return user_ref, (display["display_name"] if display else None)
+            display = fetch_one(DISPLAY_FROM_USER_SQL, (ref,))
+            return ref, (display["display_name"] if display else None)
         except Exception:
-            return user_ref, None
+            return ref, None
 
     try:
-        mapped = fetch_one(USER_FROM_DISPLAY_SQL, (user_ref,))
+        mapped = fetch_one(USER_FROM_DISPLAY_SQL, (ref,))
         if mapped:
             return mapped["user_id"], mapped["display_name"]
     except Exception:
-        return user_ref, None
+        return ref, None
 
-    return user_ref, None
+    # Partial display name fallback for user-friendly prompts like "for aarav".
+    # Apply only for non-trivial alpha inputs and only if unique.
+    if len(ref) >= 3 and any(ch.isalpha() for ch in ref):
+        try:
+            rows = fetch_rows(USER_FROM_DISPLAY_PARTIAL_SQL, (f"%{ref}%",))
+            if len(rows) == 1:
+                row = rows[0]
+                return str(row["user_id"]), str(row["display_name"])
+        except Exception:
+            return ref, None
+
+    return ref, None
 
 
 def is_human_readable_track(row: Dict[str, Any]) -> bool:
@@ -719,6 +758,15 @@ def maybe_apply_feedback_override(track_id: str) -> Dict[str, Any]:
 
 
 app = FastAPI(title="Music Recommendation API", version="0.1.0")
+
+
+@app.middleware("http")
+async def force_json_utf8_charset(request: Request, call_next):
+    response = await call_next(request)
+    content_type = response.headers.get("content-type", "")
+    if content_type.startswith("application/json") and "charset=" not in content_type.lower():
+        response.headers["content-type"] = "application/json; charset=utf-8"
+    return response
 
 
 @app.get("/metrics/model")
@@ -881,7 +929,7 @@ def get_vibe_tracks(vibe: str = Query(..., min_length=1), limit: int = Query(def
             "keywords": keywords,
             "count": len(vibe_named),
             "items": vibe_named,
-            "message": "No direct vibe metadata found; returned best keyword-matched named tracks.",
+            "message": f"Here are the closest '{cleaned}' tracks from your catalog.",
         }
 
     # Last-resort fallback: generic named trending tracks
@@ -903,7 +951,7 @@ def get_vibe_tracks(vibe: str = Query(..., min_length=1), limit: int = Query(def
             "keywords": keywords,
             "count": 0,
             "items": [],
-            "message": "No human-readable tracks available for this vibe in current dataset slice.",
+            "message": f"I couldn't find enough readable '{cleaned}' tracks yet. Try another vibe.",
         }
     return {
         "mode": "vibe_fallback_named_trending",
@@ -912,7 +960,7 @@ def get_vibe_tracks(vibe: str = Query(..., min_length=1), limit: int = Query(def
         "keywords": keywords,
         "count": len(trending),
         "items": trending,
-        "message": "No vibe-specific named tracks found; returned readable general tracks.",
+        "message": f"Here are popular tracks closest to the '{cleaned}' vibe.",
     }
 
 

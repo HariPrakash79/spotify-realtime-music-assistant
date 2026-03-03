@@ -36,6 +36,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml
 
+from text_cleanup import clean_text
+
 MB = 1024 * 1024
 
 LISTEN_EVENTS_SCHEMA = pa.schema(
@@ -202,14 +204,7 @@ def parse_iso_ts(value: str) -> Optional[datetime]:
 
 
 def safe_text(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    if text.lower() in {"nan", "none", "null"}:
-        return None
-    return text
+    return clean_text(value, repair_mojibake=True)
 
 
 def safe_float(value: object) -> Optional[float]:

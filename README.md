@@ -296,6 +296,18 @@ The project now supports:
 - recommendation-ready filtering (`music.v_listen_events_recommendation_ready`)
 - human-friendly user names (`music.user_profiles`)
 - ML recommendations via matrix factorization (`music.v_user_recommendations_mf_ready`)
+- hybrid recommendations for serving (`music.v_user_recommendations_hybrid_ready`)
+
+Repair metadata text artifacts (recommended before retraining):
+
+```powershell
+python scripts/repair_metadata_text.py --dry-run
+python scripts/repair_metadata_text.py
+```
+
+Summary output:
+
+- `artifacts/cleanup/metadata_repair_summary.json`
 
 Generate display names (writes `artifacts/user_profiles/user_names.txt`):
 
@@ -307,6 +319,12 @@ Train MF recommendations (writes to `music.user_recommendations_mf_ready`):
 
 ```powershell
 python scripts/train_personalized_mf.py --epochs 8 --factors 48 --top-k 100
+```
+
+Train hybrid recommendations (writes to `music.user_recommendations_hybrid_ready`):
+
+```powershell
+python scripts/train_hybrid_recs.py --top-k 100 --mf-scan 500 --candidate-top-n 10000 --weight-mf 0.45 --weight-pop 0.45 --weight-artist 0.10
 ```
 
 Evaluate recommendation quality (temporal holdout):
@@ -350,6 +368,7 @@ Base URL: `http://localhost:8000`
 Endpoints:
 
 - `GET /metrics/model`
+- `GET /metrics/recsource`
 - `GET /trending?limit=20`
 - `GET /recs/{user_id}?limit=20`
 - `GET /search/tracks?query=<song>&limit=10`

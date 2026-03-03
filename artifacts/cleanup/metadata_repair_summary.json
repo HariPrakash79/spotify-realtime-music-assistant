@@ -1,0 +1,74 @@
+{
+  "generated_at_utc": "2026-03-03T16:56:13.102370+00:00",
+  "dry_run": false,
+  "targets": [
+    {
+      "target": "music.listen_events.track_name",
+      "distinct_values_scanned": 73083,
+      "distinct_values_changed": 0,
+      "rows_that_would_change": 0,
+      "rows_updated": 0,
+      "examples": []
+    },
+    {
+      "target": "music.listen_events.artist_name",
+      "distinct_values_scanned": 15436,
+      "distinct_values_changed": 0,
+      "rows_that_would_change": 0,
+      "rows_updated": 0,
+      "examples": []
+    },
+    {
+      "target": "music.track_catalog.track_name",
+      "distinct_values_scanned": 0,
+      "distinct_values_changed": 0,
+      "rows_that_would_change": 0,
+      "rows_updated": 0,
+      "examples": []
+    },
+    {
+      "target": "music.track_catalog.artist_name",
+      "distinct_values_scanned": 0,
+      "distinct_values_changed": 0,
+      "rows_that_would_change": 0,
+      "rows_updated": 0,
+      "examples": []
+    },
+    {
+      "target": "music.user_recommendations_mf_ready.track_name",
+      "distinct_values_scanned": 2421,
+      "distinct_values_changed": 0,
+      "rows_that_would_change": 0,
+      "rows_updated": 0,
+      "examples": []
+    },
+    {
+      "target": "music.user_recommendations_mf_ready.artist_name",
+      "distinct_values_scanned": 1038,
+      "distinct_values_changed": 0,
+      "rows_that_would_change": 0,
+      "rows_updated": 0,
+      "examples": []
+    },
+    {
+      "target": "music.user_recommendations_hybrid_ready.track_name",
+      "distinct_values_scanned": 1106,
+      "distinct_values_changed": 0,
+      "rows_that_would_change": 0,
+      "rows_updated": 0,
+      "examples": []
+    },
+    {
+      "target": "music.user_recommendations_hybrid_ready.artist_name",
+      "distinct_values_scanned": 459,
+      "distinct_values_changed": 0,
+      "rows_that_would_change": 0,
+      "rows_updated": 0,
+      "examples": []
+    }
+  ],
+  "overall": {
+    "distinct_values_changed": 0,
+    "rows_that_would_change": 0
+  }
+}
