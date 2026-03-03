@@ -142,6 +142,17 @@
       "console": "integratedTerminal"
     },
     {
+      "name": "Build Track Vibe Features",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/build_track_vibe_features.py",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "args": [
+        "--include-unknown"
+      ]
+    },
+    {
       "name": "Call Recommendation API (Metrics)",
       "type": "python",
       "request": "launch",
@@ -151,6 +162,13 @@
         "--query",
         "metrics"
       ]
+    },
+    {
+      "name": "Run Chat Assistant",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/chat_assistant.py",
+      "console": "integratedTerminal"
     }
   ]
 }

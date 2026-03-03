@@ -21,6 +21,78 @@ CREATE INDEX IF NOT EXISTS idx_track_catalog_artist_id
 CREATE INDEX IF NOT EXISTS idx_track_catalog_genre
     ON music.track_catalog (genre);
 
+CREATE TABLE IF NOT EXISTS music.track_vibe_features (
+    track_id                 TEXT PRIMARY KEY,
+    vibe_label               TEXT NOT NULL,
+    confidence               NUMERIC(4, 3) NOT NULL,
+    label_source             TEXT NOT NULL,
+    rule_keywords            TEXT[],
+    genre                    TEXT,
+    plays_30d                BIGINT,
+    unique_listeners_30d     BIGINT,
+    updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_track_vibe_features_label
+    ON music.track_vibe_features (vibe_label, confidence DESC);
+
+CREATE INDEX IF NOT EXISTS idx_track_vibe_features_updated
+    ON music.track_vibe_features (updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS music.track_vibe_feedback (
+    feedback_id         BIGSERIAL PRIMARY KEY,
+    user_id             TEXT NOT NULL,
+    track_id            TEXT NOT NULL,
+    predicted_vibe      TEXT,
+    user_selected_vibe  TEXT NOT NULL,
+    feedback_count      INTEGER NOT NULL DEFAULT 1,
+    first_seen_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_track_vibe_feedback_user_track UNIQUE (user_id, track_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_track_vibe_feedback_track
+    ON music.track_vibe_feedback (track_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_track_vibe_feedback_vibe
+    ON music.track_vibe_feedback (user_selected_vibe);
+
+CREATE TABLE IF NOT EXISTS music.track_vibe_overrides (
+    track_id         TEXT PRIMARY KEY,
+    vibe_label       TEXT NOT NULL,
+    confidence       NUMERIC(4, 3) NOT NULL,
+    unique_users     BIGINT NOT NULL,
+    top_share        NUMERIC(5, 4) NOT NULL,
+    margin           NUMERIC(5, 4) NOT NULL,
+    threshold_users  INTEGER NOT NULL DEFAULT 15,
+    source           TEXT NOT NULL DEFAULT 'user_feedback_consensus',
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_track_vibe_overrides_label
+    ON music.track_vibe_overrides (vibe_label, confidence DESC);
+
+CREATE OR REPLACE VIEW music.v_track_vibe_effective AS
+SELECT
+    COALESCE(vf.track_id, vo.track_id) AS track_id,
+    COALESCE(vo.vibe_label, vf.vibe_label) AS vibe_label,
+    COALESCE(vo.confidence, vf.confidence, 0.150) AS confidence,
+    CASE
+        WHEN vo.track_id IS NOT NULL THEN 'user_feedback_override'
+        ELSE COALESCE(vf.label_source, 'unknown')
+    END AS label_source,
+    vf.rule_keywords,
+    vf.genre,
+    COALESCE(vf.plays_30d, 0) AS plays_30d,
+    COALESCE(vf.unique_listeners_30d, 0) AS unique_listeners_30d,
+    vo.unique_users AS override_unique_users,
+    vo.top_share AS override_top_share,
+    vo.margin AS override_margin,
+    COALESCE(vo.updated_at, vf.updated_at, NOW()) AS updated_at
+FROM music.track_vibe_features vf
+FULL OUTER JOIN music.track_vibe_overrides vo
+  ON vo.track_id = vf.track_id;
+
 CREATE TABLE IF NOT EXISTS music.listen_events (
     event_id        BIGSERIAL PRIMARY KEY,
     source          TEXT NOT NULL,

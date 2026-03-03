@@ -310,6 +310,9 @@ Endpoints:
 - `GET /metrics/model`
 - `GET /trending?limit=20`
 - `GET /recs/{user_id}?limit=20`
+- `GET /search/tracks?query=<song>&limit=10`
+- `GET /vibe?vibe=<chill|focus|happy|sad|party|energetic|romantic>&limit=10`
+- `POST /feedback/vibe`
 
 Examples:
 
@@ -317,6 +320,9 @@ Examples:
 curl "http://localhost:8000/metrics/model"
 curl "http://localhost:8000/trending?limit=10"
 curl "http://localhost:8000/recs/user_000002?limit=20"
+curl "http://localhost:8000/search/tracks?query=Morning%20Child&limit=5"
+curl "http://localhost:8000/vibe?vibe=chill&limit=10"
+curl -X POST "http://localhost:8000/feedback/vibe" -H "Content-Type: application/json" -d "{\"user_id\":\"101617\",\"track_id\":\"45659\",\"user_selected_vibe\":\"energetic\",\"predicted_vibe\":\"chill\"}"
 ```
 
 Python client helper:
@@ -325,6 +331,9 @@ Python client helper:
 python scripts/recommendation_client.py --query metrics
 python scripts/recommendation_client.py --query trending --limit 10
 python scripts/recommendation_client.py --query recs --user-id 101617 --limit 20 --fallback-to-trending
+python scripts/recommendation_client.py --query search --text "Morning Child" --limit 5
+python scripts/recommendation_client.py --query vibe --text chill --limit 10
+python scripts/recommendation_client.py --query feedback --user-id 101617 --track-id 45659 --vibe energetic --predicted-vibe chill
 ```
 
 Optional base URL override:
@@ -332,6 +341,43 @@ Optional base URL override:
 ```powershell
 $env:RECOMMENDATION_API_BASE_URL="http://localhost:8000"
 ```
+
+### Vibe Feature Engineering
+
+Build/update vibe labels from `track_catalog.genre` plus 30-day popularity signals:
+
+```powershell
+python scripts/build_track_vibe_features.py --include-unknown
+```
+
+This populates `music.track_vibe_features` used by `/vibe` endpoint.
+
+### Feedback-driven vibe override
+
+`POST /feedback/vibe` stores user corrections and can override a track vibe only when there is consensus.
+
+Default consensus thresholds:
+- minimum unique users per track: `15`
+- top vibe share: `>= 70%`
+- margin over second vibe: `>= 15%`
+
+If thresholds are met, an override is written to `music.track_vibe_overrides`.
+
+Effective labels used by `/vibe` are read from:
+- `music.v_track_vibe_effective` (override first, engineered label second)
+
+### Interactive Chat Assistant
+
+Run:
+
+```powershell
+python scripts/chat_assistant.py
+```
+
+Behavior:
+- If user asks recommendations with `user_id`, assistant calls personalized `/recs/{user_id}`.
+- If a requested song is not found, assistant asks for vibe and returns closest vibe-based songs.
+- If there is no user context, assistant falls back to trending.
 
 ## Data targets and progress check
 
