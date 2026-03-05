@@ -1214,7 +1214,7 @@ DEMO_CHAT_HTML = r"""<!doctype html>
         <button class="chip" data-prompt="party songs for Aarav Edwards">Aarav party</button>
         <button class="chip" data-prompt="sad songs for Abigail Johnson">Abigail sad</button>
         <button class="chip" data-prompt="romantic songs for Camila Lopez">Camila romantic</button>
-        <button class="chip" data-prompt="5 more">5 more</button>
+        <button class="chip" data-prompt="favorites of Ariana Reed">Ariana favs</button>
       </div>
       <div id="chat" class="chat"></div>
       <div class="composer">
@@ -1436,7 +1436,7 @@ DEMO_CHAT_HTML = r"""<!doctype html>
           "Examples:\n" +
           "- romantic songs for Aarav Edwards\n" +
           "- party songs for Abigail Johnson\n" +
-          "- 5 more"
+          "- favorites of Ariana Reed"
         );
         return;
       }
@@ -1447,7 +1447,7 @@ DEMO_CHAT_HTML = r"""<!doctype html>
           "- Recommend songs for Aarav Edwards\n" +
           "- party songs for Abigail Johnson\n" +
           "- chill songs\n" +
-          "- 5 more\n" +
+          "- favorites of Ariana Reed\n" +
           "- like 1"
         );
         return;
@@ -1661,7 +1661,7 @@ DEMO_CHAT_HTML = r"""<!doctype html>
     });
 
     addBubble(
-      "Live demo assistant is ready.\nAPI base: " + API_BASE + "\n\nTry:\n- Recommend songs for Aarav Edwards\n- party songs for Abigail Johnson\n- 5 more\n- like 1"
+      "Live demo assistant is ready.\nAPI base: " + API_BASE + "\n\nTry:\n- Recommend songs for Aarav Edwards\n- party songs for Abigail Johnson\n- favorites of Ariana Reed\n- like 1"
     );
   </script>
 </body>
