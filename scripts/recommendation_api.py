@@ -1374,6 +1374,7 @@ DEMO_CHAT_HTML = r"""<!doctype html>
     async function handleMessage(text) {
       const raw = text.trim();
       const lower = raw.toLowerCase();
+      const norm = lower.replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
       if (!raw) return;
 
       if (isMore(raw)) {
@@ -1423,8 +1424,24 @@ DEMO_CHAT_HTML = r"""<!doctype html>
         return;
       }
 
-      if (/(metrics|health|status)/.test(lower)) {
+      const asksTrackCount = /\bhow many\s+tracks?\b|\btotal\s+tracks?\b|\btracks?\s+in\s+total\b|\btrack\s+count\b/.test(norm);
+      const asksUserCount = /\bhow many\s+users?\b|\btotal\s+users?\b|\buser\s+count\b/.test(norm);
+      const asksEventCount = /\bhow many\s+events?\b|\btotal\s+events?\b|\bevent\s+count\b/.test(norm);
+      const asksMetrics = /\bmetrics?\b|\bhealth\b|\bstatus\b/.test(norm) || asksTrackCount || asksUserCount || asksEventCount;
+      if (asksMetrics) {
         const m = await apiGet("/metrics/model");
+        if (asksTrackCount && !asksUserCount && !asksEventCount) {
+          addBubble("Total tracks in catalog: " + (m.tracks || 0));
+          return;
+        }
+        if (asksUserCount && !asksTrackCount && !asksEventCount) {
+          addBubble("Total users in model: " + (m.users || 0));
+          return;
+        }
+        if (asksEventCount && !asksTrackCount && !asksUserCount) {
+          addBubble("Total events in model: " + (m.events || 0));
+          return;
+        }
         addBubble(
           "System status:\n" +
           "events: " + (m.events || 0) + "\n" +
@@ -1435,9 +1452,14 @@ DEMO_CHAT_HTML = r"""<!doctype html>
       }
 
       const vibe = extractVibe(raw);
-      const userRef = extractUserRef(raw);
-      const wantsRecs = /(recommend|recs|suggest|songs|music|favorites)/.test(lower);
+      let userRef = extractUserRef(raw);
+      const wantsFavorites = /\bfavs?\b|\bfavorites?\b|\bfavourites?\b/.test(norm);
+      const wantsRecs = /\brecommend\b|\brecs?\b|\bsuggest\b|\bsongs?\b|\bmusic\b/.test(norm);
       const pageSize = parseLimit(raw, 10);
+
+      if (wantsFavorites && !userRef && state.lastUserRef) {
+        userRef = state.lastUserRef;
+      }
 
       if (vibe && userRef) {
         const [recsData, vibeData] = await Promise.all([
@@ -1448,16 +1470,77 @@ DEMO_CHAT_HTML = r"""<!doctype html>
         const vibeItems = Array.isArray(vibeData.items) ? vibeData.items : [];
         const vibeKeys = new Set(vibeItems.map(keyOf));
         const overlap = recItems.filter((r) => vibeKeys.has(keyOf(r)));
+        const overlapKeys = new Set(overlap.map(keyOf));
+        const vibeFill = vibeItems.filter((r) => !overlapKeys.has(keyOf(r)));
+        const combined = overlap.concat(vibeFill);
+        const shownCount = Math.min(pageSize, combined.length);
         state.lastUserRef = userRef;
         state.lastVibe = vibe;
-        state.lastMode = "personalized_vibe";
-        state.lastItems = overlap.length ? overlap : recItems;
-        state.lastOffset = pageSize;
-        if (overlap.length) {
-          addBubble("Here are " + Math.min(pageSize, overlap.length) + " personalized '" + vibe + "' songs for " + userRef + ":\n\n" + formatItems(overlap, pageSize));
+        state.lastMode = "personalized_vibe_blended";
+        state.lastItems = combined.length ? combined : recItems;
+        state.lastOffset = Math.min(pageSize, state.lastItems.length);
+        if (overlap.length >= pageSize) {
+          addBubble("Here are " + pageSize + " personalized '" + vibe + "' songs for " + userRef + ":\n\n" + formatItems(combined, pageSize));
           return;
         }
-        addBubble("I could not find strong '" + vibe + "' overlap for " + userRef + " yet. Here are personalized songs instead:\n\n" + formatItems(recItems, pageSize));
+        if (overlap.length > 0 && combined.length > overlap.length) {
+          const added = Math.max(0, shownCount - overlap.length);
+          addBubble(
+            "I found " + overlap.length + " personalized '" + vibe + "' songs for " + userRef +
+            ". Added " + added + " more popular '" + vibe + "' tracks to complete the list:\n\n" +
+            formatItems(combined, pageSize)
+          );
+          return;
+        }
+        if (combined.length) {
+          addBubble(
+            "I could not find personalized '" + vibe + "' songs for " + userRef +
+            " yet. Here are " + shownCount + " popular '" + vibe + "' tracks:\n\n" +
+            formatItems(combined, pageSize)
+          );
+          return;
+        }
+        if (recItems.length) {
+          addBubble(
+            "I could not find enough '" + vibe + "' tracks right now. Here are personalized songs for " +
+            userRef + " instead:\n\n" + formatItems(recItems, pageSize)
+          );
+          return;
+        }
+        addBubble("I couldn't find enough tracks for that request yet. Try another vibe or user.");
+        return;
+      }
+
+      if (userRef && wantsFavorites) {
+        const favData = await apiGet("/favorites/" + encodeURIComponent(userRef), {
+          limit: Math.max(pageSize, 10),
+          fallback_to_recs: false,
+          session_id: state.sessionId,
+        });
+        const items = Array.isArray(favData.items) ? favData.items : [];
+        state.lastUserRef = userRef;
+        state.lastVibe = null;
+        state.lastMode = "favorites";
+        state.lastItems = items;
+        state.lastOffset = Math.min(pageSize, state.lastItems.length);
+        if (items.length) {
+          const prefix = String(favData.message || "").trim();
+          if (prefix) {
+            addBubble(prefix + "\n\n" + formatItems(items, pageSize));
+          } else {
+            addBubble(
+              "Here are " + Math.min(pageSize, items.length) + " favorites for " + userRef + ":\n\n" +
+              formatItems(items, pageSize)
+            );
+          }
+        } else {
+          addBubble("No favorites available yet for " + userRef + ".");
+        }
+        return;
+      }
+
+      if (wantsFavorites && !userRef) {
+        addBubble("Tell me which user you mean, for example: favorites for Aarav Edwards.");
         return;
       }
 
@@ -1472,7 +1555,7 @@ DEMO_CHAT_HTML = r"""<!doctype html>
         state.lastVibe = null;
         state.lastMode = "recs";
         state.lastItems = items;
-        state.lastOffset = pageSize;
+        state.lastOffset = Math.min(pageSize, state.lastItems.length);
         addBubble("Here are " + Math.min(pageSize, items.length) + " recommendations for " + userRef + ":\n\n" + formatItems(items, pageSize));
         return;
       }
@@ -1483,7 +1566,7 @@ DEMO_CHAT_HTML = r"""<!doctype html>
         state.lastVibe = vibe;
         state.lastMode = "vibe";
         state.lastItems = items;
-        state.lastOffset = pageSize;
+        state.lastOffset = Math.min(pageSize, state.lastItems.length);
         addBubble("Here are " + Math.min(pageSize, items.length) + " '" + vibe + "' tracks:\n\n" + formatItems(items, pageSize));
         return;
       }
@@ -1492,7 +1575,7 @@ DEMO_CHAT_HTML = r"""<!doctype html>
       const items = Array.isArray(trending.items) ? trending.items : [];
       state.lastMode = "trending";
       state.lastItems = items;
-      state.lastOffset = pageSize;
+      state.lastOffset = Math.min(pageSize, state.lastItems.length);
       addBubble("I interpreted that as a general music request. Here are popular tracks:\n\n" + formatItems(items, pageSize));
     }
 
