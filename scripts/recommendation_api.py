@@ -1299,6 +1299,9 @@ DEMO_CHAT_HTML = r"""<!doctype html>
       if (mx) {
         let candidate = mx[1].trim();
         candidate = candidate.replace(/\b(now|please|pls|then)\b$/i, "").trim();
+        if (/^(him|her|them)$/i.test(candidate)) {
+          return state.lastUserRef || null;
+        }
         if (/^abi(\b|gail)/i.test(candidate)) return "Abigail Johnson";
         if (/^aarav\b/i.test(candidate)) return "Aarav Edwards";
         if (/^ariana\b/i.test(candidate)) return "Ariana Reed";
@@ -1319,7 +1322,11 @@ DEMO_CHAT_HTML = r"""<!doctype html>
 
     function isMore(text) {
       const lower = text.toLowerCase().trim();
-      return /^(\d+\s+more|more|give\s+\d+\s+more|another\s+\d+)$/.test(lower);
+      return (
+        /^(?:\d+\s+more|more)$/.test(lower) ||
+        /\bgive\s+\d+\s+more\b/.test(lower) ||
+        /\banother\s+\d+\b/.test(lower)
+      );
     }
 
     async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
@@ -1566,18 +1573,18 @@ DEMO_CHAT_HTML = r"""<!doctype html>
         state.lastItems = items;
         state.lastOffset = Math.min(pageSize, state.lastItems.length);
         const requestedLabel = wantsMostListened ? "most listened tracks" : "favorites";
+        const prefix = String(favData.message || "").trim();
         if (items.length) {
-          const prefix = String(favData.message || "").trim();
-          if (prefix) {
-            addBubble(prefix + "\n\n" + formatItems(items, pageSize));
-          } else {
-            addBubble(
-              "Here are " + Math.min(pageSize, items.length) + " " + requestedLabel + " for " + userRef + ":\n\n" +
-              formatItems(items, pageSize)
-            );
-          }
+          addBubble(
+            "Here are " + Math.min(pageSize, items.length) + " " + requestedLabel + " for " + userRef + ":\n\n" +
+            formatItems(items, pageSize)
+          );
         } else {
-          addBubble("No " + requestedLabel + " available yet for " + userRef + ".");
+          if (prefix) {
+            addBubble(prefix.replace(/\byour\b/ig, userRef + "'s"));
+          } else {
+            addBubble("No " + requestedLabel + " available yet for " + userRef + ".");
+          }
         }
         return;
       }
