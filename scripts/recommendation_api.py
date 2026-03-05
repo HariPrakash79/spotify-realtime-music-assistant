@@ -23,6 +23,7 @@ import re
 from typing import Any, Dict, List, Mapping, Sequence
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from psycopg import connect
 from psycopg.rows import dict_row
@@ -1058,6 +1059,483 @@ def maybe_apply_feedback_override(track_id: str) -> Dict[str, Any]:
 app = FastAPI(title="Music Recommendation API", version="0.1.0")
 
 
+DEMO_CHAT_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Spotify Recommendation Demo</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg-0: #07142b;
+      --bg-1: #0f2748;
+      --card: rgba(9, 25, 48, 0.78);
+      --ink: #edf5ff;
+      --ink-dim: #b5c7e1;
+      --accent: #2ae8b4;
+      --accent-2: #6fc3ff;
+      --border: rgba(130, 167, 214, 0.35);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Space Grotesk", "Segoe UI", sans-serif;
+      color: var(--ink);
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 10% 10%, rgba(42, 232, 180, 0.14), transparent 35%),
+        radial-gradient(circle at 85% 15%, rgba(111, 195, 255, 0.18), transparent 42%),
+        linear-gradient(165deg, var(--bg-0), var(--bg-1) 62%, #12315b);
+    }
+    .wrap {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 22px 14px 18px;
+    }
+    .title {
+      margin: 0 0 6px;
+      font-size: clamp(1.45rem, 2.8vw, 2.1rem);
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+    .sub {
+      margin: 0 0 14px;
+      color: var(--ink-dim);
+      font-size: 0.94rem;
+      line-height: 1.45;
+    }
+    .panel {
+      border: 1px solid var(--border);
+      background: var(--card);
+      border-radius: 16px;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 14px 30px rgba(0, 0, 0, 0.22);
+      overflow: hidden;
+    }
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 12px 12px 0;
+    }
+    .chip {
+      border: 1px solid var(--border);
+      color: var(--ink);
+      background: rgba(26, 53, 92, 0.75);
+      border-radius: 999px;
+      font-size: 0.82rem;
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+    .chip:hover {
+      border-color: rgba(111, 195, 255, 0.75);
+    }
+    .chat {
+      height: min(64vh, 620px);
+      padding: 12px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .bubble {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      white-space: pre-wrap;
+      line-height: 1.45;
+      max-width: 92%;
+      font-size: 0.93rem;
+    }
+    .u {
+      align-self: flex-end;
+      background: rgba(28, 89, 154, 0.55);
+      border-color: rgba(111, 195, 255, 0.5);
+    }
+    .a {
+      align-self: flex-start;
+      background: rgba(18, 48, 84, 0.85);
+    }
+    .meta {
+      color: var(--ink-dim);
+      font-size: 0.79rem;
+      margin-top: 7px;
+    }
+    .composer {
+      display: flex;
+      gap: 8px;
+      border-top: 1px solid var(--border);
+      padding: 10px;
+    }
+    .composer input {
+      flex: 1;
+      border: 1px solid var(--border);
+      background: rgba(6, 21, 41, 0.7);
+      color: var(--ink);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font: inherit;
+      outline: none;
+    }
+    .composer input:focus {
+      border-color: rgba(42, 232, 180, 0.6);
+      box-shadow: 0 0 0 2px rgba(42, 232, 180, 0.18);
+    }
+    .composer button {
+      border: 0;
+      border-radius: 10px;
+      background: linear-gradient(120deg, var(--accent), var(--accent-2));
+      color: #042138;
+      font-weight: 700;
+      padding: 10px 14px;
+      cursor: pointer;
+    }
+    .composer button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .foot {
+      margin-top: 10px;
+      color: var(--ink-dim);
+      font-size: 0.79rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1 class="title">Music Assistant Demo</h1>
+    <p class="sub">Ask naturally for recommendations and moods. This UI hits the live recommendation API directly.</p>
+    <div class="panel">
+      <div class="chip-row">
+        <button class="chip" data-prompt="Recommend songs for Aarav Edwards">Aarav recs</button>
+        <button class="chip" data-prompt="party songs for Aarav Edwards">Aarav party</button>
+        <button class="chip" data-prompt="sad songs for Abigail Johnson">Abigail sad</button>
+        <button class="chip" data-prompt="romantic songs for Camila Lopez">Camila romantic</button>
+        <button class="chip" data-prompt="5 more">5 more</button>
+      </div>
+      <div id="chat" class="chat"></div>
+      <div class="composer">
+        <input id="input" type="text" placeholder="Type: Recommend songs for Aarav Edwards" />
+        <button id="send">Send</button>
+      </div>
+    </div>
+    <div class="foot">Supported vibe labels: chill, focus, happy, sad, party, energetic, romantic.</div>
+  </div>
+
+  <script>
+    const VIBES = ["chill", "focus", "happy", "sad", "party", "energetic", "romantic"];
+    const qs = new URLSearchParams(window.location.search);
+    const apiParam = qs.get("api_base");
+    const API_BASE = (apiParam && apiParam.trim()) ? apiParam.trim().replace(/\/+$/, "") : window.location.origin;
+    const timeoutParam = Number(qs.get("timeout_ms"));
+    const FETCH_TIMEOUT_MS = Number.isFinite(timeoutParam) && timeoutParam >= 5000 ? timeoutParam : 25000;
+    const state = {
+      sessionId: "demo_web_" + Date.now(),
+      lastUserRef: null,
+      lastVibe: null,
+      lastItems: [],
+      lastOffset: 0,
+      lastMode: null,
+    };
+
+    const chatEl = document.getElementById("chat");
+    const inputEl = document.getElementById("input");
+    const sendEl = document.getElementById("send");
+
+    function addBubble(text, role = "a", meta = "") {
+      const bubble = document.createElement("div");
+      bubble.className = "bubble " + role;
+      bubble.textContent = text;
+      if (meta) {
+        const m = document.createElement("div");
+        m.className = "meta";
+        m.textContent = meta;
+        bubble.appendChild(m);
+      }
+      chatEl.appendChild(bubble);
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    function formatItems(items, limit = 10) {
+      const rows = [];
+      const sliced = items.slice(0, Math.max(1, limit));
+      for (let i = 0; i < sliced.length; i++) {
+        const row = sliced[i] || {};
+        const name = row.track_name || row.track_id || "Unknown track";
+        const artist = row.artist_name || row.artist_id || "Unknown artist";
+        rows.push((i + 1) + ". " + name + " - " + artist);
+      }
+      return rows.join("\n");
+    }
+
+    function keyOf(row) {
+      const track = String(row.track_id || "").trim().toLowerCase();
+      const name = String(row.track_name || "").trim().toLowerCase();
+      const artist = String(row.artist_name || "").trim().toLowerCase();
+      return track ? ("id:" + track) : ("na:" + name + "|" + artist);
+    }
+
+    function parseLimit(text, fallback = 10) {
+      const m = text.match(/\b([1-9]|1[0-9]|20)\b/);
+      return m ? Number(m[1]) : fallback;
+    }
+
+    function extractVibe(text) {
+      const lower = text.toLowerCase();
+      for (const vibe of VIBES) {
+        if (lower.includes(vibe)) {
+          return vibe;
+        }
+      }
+      return null;
+    }
+
+    function extractUserRef(text) {
+      const lower = text.toLowerCase();
+      const mx = text.match(/\b(?:for|to)\s+([A-Za-z][A-Za-z .'\-]{1,80})$/);
+      if (mx) {
+        return mx[1].trim();
+      }
+      if (/aarav/.test(lower)) return "Aarav Edwards";
+      if (/abigail|abi\b/.test(lower)) return "Abigail Johnson";
+      if (/ariana/.test(lower)) return "Ariana Reed";
+      if (/camila/.test(lower)) return "Camila Lopez";
+      if (/caleb|rogers/.test(lower)) return "Caleb Rogers";
+      if (/\b(him|her|them|for him|for her)\b/.test(lower) && state.lastUserRef) {
+        return state.lastUserRef;
+      }
+      return null;
+    }
+
+    function isMore(text) {
+      const lower = text.toLowerCase().trim();
+      return /^(\d+\s+more|more|give\s+\d+\s+more|another\s+\d+)$/.test(lower);
+    }
+
+    async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await fetch(url, { ...options, signal: controller.signal });
+      } catch (err) {
+        if (err && err.name === "AbortError") {
+          throw new Error(
+            "Request timed out after " + Math.round(timeoutMs / 1000) + "s. " +
+            "API base: " + API_BASE + ". " +
+            "If local backend cannot reach DB, open /demo?api_base=https://uq3i5irvfr.us-east-2.awsapprunner.com"
+          );
+        }
+        throw err;
+      } finally {
+        clearTimeout(id);
+      }
+    }
+
+    async function apiGet(path, params = {}) {
+      const url = new URL(path, API_BASE);
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== null && v !== undefined && String(v).length > 0) {
+          url.searchParams.set(k, String(v));
+        }
+      }
+      const resp = await fetchWithTimeout(url.toString(), { method: "GET" });
+      if (!resp.ok) {
+        let detail = resp.statusText;
+        try {
+          const payload = await resp.json();
+          detail = payload.detail || JSON.stringify(payload);
+        } catch (_err) {}
+        throw new Error(resp.status + " " + detail);
+      }
+      return await resp.json();
+    }
+
+    async function apiPost(path, payload) {
+      const url = new URL(path, API_BASE);
+      const resp = await fetchWithTimeout(url.toString(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) {
+        let detail = resp.statusText;
+        try {
+          const data = await resp.json();
+          detail = data.detail || JSON.stringify(data);
+        } catch (_err) {}
+        throw new Error(resp.status + " " + detail);
+      }
+      return await resp.json();
+    }
+
+    async function handleMessage(text) {
+      const raw = text.trim();
+      const lower = raw.toLowerCase();
+      if (!raw) return;
+
+      if (isMore(raw)) {
+        const pageSize = parseLimit(raw, 5);
+        const start = state.lastOffset;
+        const end = start + pageSize;
+        const page = state.lastItems.slice(start, end);
+        if (!page.length) {
+          addBubble("No more unseen tracks in the current list. Ask for a different user or vibe.");
+          return;
+        }
+        state.lastOffset = end;
+        addBubble(formatItems(page, page.length));
+        return;
+      }
+
+      const likeMatch = lower.match(/^like\s+([1-9]|1[0-9]|20)$/);
+      if (likeMatch && state.lastItems.length && state.lastUserRef) {
+        const idx = Number(likeMatch[1]) - 1;
+        const row = state.lastItems[idx];
+        if (!row) {
+          addBubble("That item number is out of range.");
+          return;
+        }
+        const payload = {
+          user_id: state.lastUserRef,
+          track_id: row.track_id,
+          action: "like",
+          source_endpoint: "/demo",
+          recommendation_rank: idx + 1,
+          session_id: state.sessionId,
+        };
+        const result = await apiPost("/feedback/interaction", payload);
+        addBubble("Feedback saved as '" + result.status + "'.");
+        return;
+      }
+
+      if (/(help|what can you do|genres|vibes)/.test(lower)) {
+        addBubble(
+          "You can ask for:\n" +
+          "- Recommend songs for Aarav Edwards\n" +
+          "- party songs for Abigail Johnson\n" +
+          "- chill songs\n" +
+          "- 5 more\n" +
+          "- like 1"
+        );
+        return;
+      }
+
+      if (/(metrics|health|status)/.test(lower)) {
+        const m = await apiGet("/metrics/model");
+        addBubble(
+          "System status:\n" +
+          "events: " + (m.events || 0) + "\n" +
+          "users: " + (m.users || 0) + "\n" +
+          "tracks: " + (m.tracks || 0)
+        );
+        return;
+      }
+
+      const vibe = extractVibe(raw);
+      const userRef = extractUserRef(raw);
+      const wantsRecs = /(recommend|recs|suggest|songs|music|favorites)/.test(lower);
+      const pageSize = parseLimit(raw, 10);
+
+      if (vibe && userRef) {
+        const [recsData, vibeData] = await Promise.all([
+          apiGet("/recs/" + encodeURIComponent(userRef), { limit: 40, fallback_to_trending: true, session_id: state.sessionId }),
+          apiGet("/vibe", { vibe: vibe, limit: 100, user_id: userRef, session_id: state.sessionId }),
+        ]);
+        const recItems = Array.isArray(recsData.items) ? recsData.items : [];
+        const vibeItems = Array.isArray(vibeData.items) ? vibeData.items : [];
+        const vibeKeys = new Set(vibeItems.map(keyOf));
+        const overlap = recItems.filter((r) => vibeKeys.has(keyOf(r)));
+        state.lastUserRef = userRef;
+        state.lastVibe = vibe;
+        state.lastMode = "personalized_vibe";
+        state.lastItems = overlap.length ? overlap : recItems;
+        state.lastOffset = pageSize;
+        if (overlap.length) {
+          addBubble("Here are " + Math.min(pageSize, overlap.length) + " personalized '" + vibe + "' songs for " + userRef + ":\n\n" + formatItems(overlap, pageSize));
+          return;
+        }
+        addBubble("I could not find strong '" + vibe + "' overlap for " + userRef + " yet. Here are personalized songs instead:\n\n" + formatItems(recItems, pageSize));
+        return;
+      }
+
+      if (userRef && wantsRecs) {
+        const recsData = await apiGet("/recs/" + encodeURIComponent(userRef), {
+          limit: Math.max(pageSize, 10),
+          fallback_to_trending: true,
+          session_id: state.sessionId,
+        });
+        const items = Array.isArray(recsData.items) ? recsData.items : [];
+        state.lastUserRef = userRef;
+        state.lastVibe = null;
+        state.lastMode = "recs";
+        state.lastItems = items;
+        state.lastOffset = pageSize;
+        addBubble("Here are " + Math.min(pageSize, items.length) + " recommendations for " + userRef + ":\n\n" + formatItems(items, pageSize));
+        return;
+      }
+
+      if (vibe) {
+        const vibeData = await apiGet("/vibe", { vibe: vibe, limit: Math.max(pageSize, 10), session_id: state.sessionId });
+        const items = Array.isArray(vibeData.items) ? vibeData.items : [];
+        state.lastVibe = vibe;
+        state.lastMode = "vibe";
+        state.lastItems = items;
+        state.lastOffset = pageSize;
+        addBubble("Here are " + Math.min(pageSize, items.length) + " '" + vibe + "' tracks:\n\n" + formatItems(items, pageSize));
+        return;
+      }
+
+      const trending = await apiGet("/trending", { limit: Math.max(pageSize, 10), session_id: state.sessionId });
+      const items = Array.isArray(trending.items) ? trending.items : [];
+      state.lastMode = "trending";
+      state.lastItems = items;
+      state.lastOffset = pageSize;
+      addBubble("I interpreted that as a general music request. Here are popular tracks:\n\n" + formatItems(items, pageSize));
+    }
+
+    async function sendMessage() {
+      const text = inputEl.value.trim();
+      if (!text) return;
+      inputEl.value = "";
+      addBubble(text, "u");
+      sendEl.disabled = true;
+      try {
+        await handleMessage(text);
+      } catch (err) {
+        addBubble("Request failed: " + (err && err.message ? err.message : String(err)));
+      } finally {
+        sendEl.disabled = false;
+        inputEl.focus();
+      }
+    }
+
+    sendEl.addEventListener("click", sendMessage);
+    inputEl.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" && !ev.shiftKey) {
+        ev.preventDefault();
+        sendMessage();
+      }
+    });
+
+    document.querySelectorAll(".chip").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        inputEl.value = btn.getAttribute("data-prompt") || "";
+        sendMessage();
+      });
+    });
+
+    addBubble(
+      "Live demo assistant is ready.\nAPI base: " + API_BASE + "\n\nTry:\n- Recommend songs for Aarav Edwards\n- party songs for Abigail Johnson\n- 5 more\n- like 1"
+    );
+  </script>
+</body>
+</html>
+"""
+
+
 @app.middleware("http")
 async def force_json_utf8_charset(request: Request, call_next):
     response = await call_next(request)
@@ -1065,6 +1543,16 @@ async def force_json_utf8_charset(request: Request, call_next):
     if content_type.startswith("application/json") and "charset=" not in content_type.lower():
         response.headers["content-type"] = "application/json; charset=utf-8"
     return response
+
+
+@app.get("/", include_in_schema=False)
+def root_redirect_to_demo() -> RedirectResponse:
+    return RedirectResponse(url="/demo")
+
+
+@app.get("/demo", include_in_schema=False, response_class=HTMLResponse)
+def demo_page() -> HTMLResponse:
+    return HTMLResponse(content=DEMO_CHAT_HTML)
 
 
 @app.get("/metrics/model")
