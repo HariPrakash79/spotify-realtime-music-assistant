@@ -1,0 +1,95 @@
+﻿Spotify Realtime Music Assistant
+Demo Prompts and User Names
+
+EXAMPLE PROMPTS
+---------------
+1. Recommend songs for Aarav Edwards
+2. party songs for Abigail Johnson
+3. romantic songs for Camila Lopez
+4. sad songs for Ariana Reed
+5. energetic songs for Caleb Rogers
+6. favorites of Ariana Reed
+7. most listened tracks of Abigail Johnson
+8. give 5 more
+9. how many users
+10. how many tracks are there in total
+11. like 1
+
+ALL USER NAMES (76)
+-------------------
+1. Riley Gray
+2. Leah James
+3. Harry Robinson
+4. Lily Watson
+5. James Stewart
+6. Lucy Thomas
+7. Caleb Rogers
+8. Felix Campbell
+9. Chloe Barnes
+10. David Walker
+11. Sophie Hayes
+12. Sophie Griffin
+13. Gabriel Rogers
+14. Isla Lopez
+15. Elijah Morris
+16. Julia Simmons
+17. Abigail Johnson
+18. Hudson Simmons
+19. Hannah Watson
+20. Felix Baker
+21. Elena Robinson
+22. Adrian Watson
+23. Carter Kelly
+24. Nathan Rogers
+25. Harry Taylor
+26. Christopher Perry
+27. Mila Lopez
+28. Jonathan Powell
+29. Harry Cooper
+30. Clara Cox
+31. Aria Green
+32. Scarlett Cox
+33. Jason Garcia
+34. Julia Richardson
+35. Alice Green
+36. Thomas Hughes
+37. Theodore Russell
+38. Julia Long
+39. Brandon Reed
+40. Hudson Parker
+41. Sebastian Diaz
+42. Luna James
+43. Landon Rodriguez
+44. Ivy Lopez
+45. Owen James
+46. Ariana Reed
+47. Sofia Bennett
+48. Elijah Davis
+49. Landon Moore
+50. Aisha Roberts
+51. Penelope Walker
+52. Grace Lee
+53. Aarav Edwards
+54. Camila Lopez
+55. Mia Anderson
+56. Ava Powell
+57. Scarlett Moore
+58. Caleb Jones
+59. Harry Evans
+60. Anderson Evans
+61. Grace Ross
+62. Joseph Campbell
+63. Maya Thompson
+64. Jason Scott
+65. Jack Walker
+66. Owen Jones
+67. Ivy Perez
+68. Alice Nguyen
+69. Chloe Allen
+70. Wyatt Stewart
+71. Owen Turner
+72. Alex Peterson
+73. Henry Lee
+74. Olivia Roberts
+75. Harper Anderson
+76. Carter Barnes
