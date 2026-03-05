@@ -1297,7 +1297,14 @@ DEMO_CHAT_HTML = r"""<!doctype html>
       const lower = text.toLowerCase();
       const mx = text.match(/\b(?:for|to)\s+([A-Za-z][A-Za-z .'\-]{1,80})$/);
       if (mx) {
-        return mx[1].trim();
+        let candidate = mx[1].trim();
+        candidate = candidate.replace(/\b(now|please|pls|then)\b$/i, "").trim();
+        if (/^abi(\b|gail)/i.test(candidate)) return "Abigail Johnson";
+        if (/^aarav\b/i.test(candidate)) return "Aarav Edwards";
+        if (/^ariana\b/i.test(candidate)) return "Ariana Reed";
+        if (/^camila\b/i.test(candidate)) return "Camila Lopez";
+        if (/^(caleb|rogers)\b/i.test(candidate)) return "Caleb Rogers";
+        return candidate;
       }
       if (/aarav/.test(lower)) return "Aarav Edwards";
       if (/abigail|abi\b/.test(lower)) return "Abigail Johnson";
@@ -1412,7 +1419,22 @@ DEMO_CHAT_HTML = r"""<!doctype html>
         return;
       }
 
-      if (/(help|what can you do|genres|vibes)/.test(lower)) {
+      const asksGenreCapability =
+        (/\bgenres?\b/.test(norm) && /\b(what|which|can|supported|give)\b/.test(norm)) ||
+        /\b(what\s+genres|genres?\s+can\s+you|what\s+vibes?|supported\s+vibes?)\b/.test(norm);
+      if (asksGenreCapability) {
+        addBubble(
+          "This demo is grounded on vibe labels (not full genre metadata).\n" +
+          "Supported vibe labels: chill, focus, happy, sad, party, energetic, romantic.\n\n" +
+          "Examples:\n" +
+          "- romantic songs for Aarav Edwards\n" +
+          "- party songs for Abigail Johnson\n" +
+          "- 5 more"
+        );
+        return;
+      }
+
+      if (/(help|what can you do|vibes)/.test(lower)) {
         addBubble(
           "You can ask for:\n" +
           "- Recommend songs for Aarav Edwards\n" +
@@ -1451,14 +1473,34 @@ DEMO_CHAT_HTML = r"""<!doctype html>
         return;
       }
 
-      const vibe = extractVibe(raw);
+      let vibe = extractVibe(raw);
       let userRef = extractUserRef(raw);
-      const wantsFavorites = /\bfavs?\b|\bfavorites?\b|\bfavourites?\b/.test(norm);
-      const wantsRecs = /\brecommend\b|\brecs?\b|\bsuggest\b|\bsongs?\b|\bmusic\b/.test(norm);
+      const wantsMostListened = /\bmost\s+listened\b|\btop\s+listened\b|\blistened\s+the\s+most\b|\btop\s+tracks?\b/.test(norm);
+      const wantsFavorites = /\bfavs?\b|\bfavorites?\b|\bfavourites?\b/.test(norm) || wantsMostListened;
+      let wantsRecs = /\brecommend\b|\brecs?\b|\bsuggest\b|\bsongs?\b|\bmusic\b|\bgive\s+some\b/.test(norm);
       const pageSize = parseLimit(raw, 10);
+      const hasPronounUser = /\b(him|her|them)\b/.test(norm);
 
       if (wantsFavorites && !userRef && state.lastUserRef) {
         userRef = state.lastUserRef;
+      }
+
+      if (!userRef && hasPronounUser) {
+        addBubble("Tell me which user you mean, for example: songs for Aarav Edwards.");
+        return;
+      }
+
+      // If user asks "for abi now" after a vibe request, continue with that vibe.
+      if (!vibe && userRef && state.lastVibe && !wantsFavorites) {
+        const followupSamePattern = /\b(for|give|some|songs?|music|now|then)\b/.test(norm);
+        if (followupSamePattern) {
+          vibe = state.lastVibe;
+        }
+      }
+
+      // If a user is provided but intent words are missing, assume recommendations.
+      if (userRef && !vibe && !wantsFavorites && !wantsRecs) {
+        wantsRecs = true;
       }
 
       if (vibe && userRef) {
@@ -1523,24 +1565,25 @@ DEMO_CHAT_HTML = r"""<!doctype html>
         state.lastMode = "favorites";
         state.lastItems = items;
         state.lastOffset = Math.min(pageSize, state.lastItems.length);
+        const requestedLabel = wantsMostListened ? "most listened tracks" : "favorites";
         if (items.length) {
           const prefix = String(favData.message || "").trim();
           if (prefix) {
             addBubble(prefix + "\n\n" + formatItems(items, pageSize));
           } else {
             addBubble(
-              "Here are " + Math.min(pageSize, items.length) + " favorites for " + userRef + ":\n\n" +
+              "Here are " + Math.min(pageSize, items.length) + " " + requestedLabel + " for " + userRef + ":\n\n" +
               formatItems(items, pageSize)
             );
           }
         } else {
-          addBubble("No favorites available yet for " + userRef + ".");
+          addBubble("No " + requestedLabel + " available yet for " + userRef + ".");
         }
         return;
       }
 
       if (wantsFavorites && !userRef) {
-        addBubble("Tell me which user you mean, for example: favorites for Aarav Edwards.");
+        addBubble("Tell me which user you mean, for example: favorites for Aarav Edwards or most listened for Abigail Johnson.");
         return;
       }
 
